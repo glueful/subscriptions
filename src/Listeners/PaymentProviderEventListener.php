@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Psr\Log\LoggerInterface;
 
 /**
  * Projects payvia PaymentProviderEvents onto tenant subscription state (S6/S7).
@@ -93,10 +94,43 @@ final class PaymentProviderEventListener
             );
         } catch (\Throwable $e) {
             if ($this->events->isUniqueViolation($e)) {
+                // Observability on the swallow branch: a misclassified integrity
+                // error would otherwise vanish silently. Debug-level by design.
+                $this->resolveLogger()?->debug('Duplicate provider event claim skipped', [
+                    'event' => 'subscriptions.duplicate_claim_skipped',
+                    'payvia_gateway' => $gateway,
+                    'payvia_logical_event_key' => $logicalKey,
+                    'type' => $type,
+                    'error' => $e->getMessage(),
+                ]);
+
                 return; // a concurrent/duplicate delivery already owns this logical event
             }
             throw $e;
         }
+    }
+
+    /**
+     * Resolved DEFENSIVELY: the listener must never hard-depend on a logging
+     * service -- a missing binding would turn a debug line into a fatal.
+     */
+    private function resolveLogger(): ?LoggerInterface
+    {
+        if (!$this->context->hasContainer()) {
+            return null;
+        }
+
+        $container = $this->context->getContainer();
+        foreach (['logger', LoggerInterface::class] as $id) {
+            if ($container->has($id)) {
+                $logger = $container->get($id);
+                if ($logger instanceof LoggerInterface) {
+                    return $logger;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**

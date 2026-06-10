@@ -86,6 +86,19 @@ final class EntitlementTierResolverTest extends SubscriptionsTestCase
         self::assertSame('pro', $resolver->resolve(Request::create('/api')));
     }
 
+    public function testFirstConfiguredTierWinsWhenMultipleGranted(): void
+    {
+        // Config order is ['enterprise', 'pro'] (highest first): a tenant
+        // granted BOTH flags must land in the enterprise bucket.
+        $this->setTenant('tenantA');
+        $resolver = $this->resolver($this->checker([
+            'rate.tier.enterprise' => true,
+            'rate.tier.pro' => true,
+        ]));
+
+        self::assertSame('enterprise', $resolver->resolve(Request::create('/api')));
+    }
+
     public function testNoGrantedTierDelegatesToWrappedDefault(): void
     {
         $this->setTenant('tenantA');

@@ -7,7 +7,11 @@ namespace Glueful\Extensions\Subscriptions\Repositories;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Helpers\Utils;
 
-final class SubscriptionEventRepository
+/**
+ * Intentionally NON-final: the listener suite subclasses existsByLogicalKey()
+ * to simulate the read-side race window and prove the DB-enforced claim gate.
+ */
+class SubscriptionEventRepository
 {
     /** @param array<string,mixed> $event */
     public function insertOrThrow(ApplicationContext $context, array $event): void

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Subscriptions\Tests\Integration\Listeners;
 
+use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
@@ -109,6 +110,59 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         self::assertSame('past_due', $row['status']);
         self::assertSame($sentinel, $row['grace_ends_at']);
         self::assertSame(1, $this->eventCount());
+    }
+
+    public function testTransactionalClaimGatesDuplicateWhenReadSideMisses(): void
+    {
+        // The dedupe test above short-circuits at the read-side early-out. Here
+        // existsByLogicalKey() always lies (false) -- simulating the race window
+        // where two deliveries both pass the read check -- so BOTH dispatches
+        // reach the transactional claim and the DB unique index is the ONLY gate:
+        // claim-failure -> rollback -> no re-projection, and no exception escapes.
+        $blindEvents = new class extends SubscriptionEventRepository {
+            public function existsByLogicalKey(ApplicationContext $context, string $gateway, string $key): bool
+            {
+                return false; // the read side never sees the claim
+            }
+        };
+
+        $listener = new PaymentProviderEventListener(
+            new SubscriptionRepository(),
+            $blindEvents,
+            PlanCatalog::fromContext($this->appContext()),
+            $this->appContext()
+        );
+
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'trialing',
+            'payvia_gateway' => 'paystack',
+            'payvia_subscription_id' => 'sub_X',
+        ]);
+
+        $dispatch = static function () use ($listener): void {
+            $listener(new FakePaymentProviderEvent(
+                new FakeProviderEvent('paystack', 'subscription.past_due', 'k1', [
+                    'gateway_subscription_id' => 'sub_X',
+                ])
+            ));
+        };
+
+        $dispatch();
+
+        // Sentinel grace: any re-projection would recompute now + grace_days.
+        $sentinel = '2030-01-01 00:00:00';
+        $this->connection()->table('subscriptions')
+            ->where('tenant_uuid', 'tenantA')
+            ->update(['grace_ends_at' => $sentinel]);
+
+        $dispatch(); // duplicate claim must be swallowed, not thrown
+
+        $row = $this->subscription();
+        self::assertSame('past_due', $row['status']);
+        self::assertSame($sentinel, $row['grace_ends_at']);
+        self::assertSame(1, $this->eventCount()); // exactly one claim row
     }
 
     public function testPaymentSucceededSettlesPastDueAndClearsGrace(): void

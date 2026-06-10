@@ -55,8 +55,11 @@ Initial release.
   and projects normalized provider events onto subscription state --
   claim-first in ONE transaction (the event-row insert is the atomic gate), so
   duplicate/concurrent deliveries never re-project and `past_due` grace is set
-  exactly once. Unmapped provider subscriptions no-op; `subscription.created`
-  can recover the tenant link from provider metadata `tenant_uuid`.
+  exactly once. A swallowed duplicate claim emits a debug-level log line
+  (logger resolved defensively -- never a hard dependency) so a misclassified
+  integrity error stays observable. Unmapped provider subscriptions no-op;
+  `subscription.created` can recover the tenant link from provider metadata
+  `tenant_uuid`.
 - **Reconcile (soft payvia seam):** pulls authoritative state through payvia's
   `GatewaySubscriptionService::reconcile()` only when the class exists
   (injectable puller seam for tests); applies status/period drift and appends a
