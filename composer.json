@@ -1,0 +1,76 @@
+{
+    "name": "glueful/subscriptions",
+    "description": "Tenant subscriptions, plans, entitlements, overrides, trials, and lifecycle sync for Glueful SaaS apps.",
+    "type": "glueful-extension",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Michael Tawiah Sowah",
+            "email": "michael@glueful.dev"
+        }
+    ],
+    "keywords": [
+        "subscriptions",
+        "entitlements",
+        "billing",
+        "plans",
+        "saas",
+        "glueful"
+    ],
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "require": {
+        "php": "^8.3"
+    },
+    "require-dev": {
+        "glueful/framework": "^1.54.0",
+        "phpstan/phpstan": "^1.0",
+        "phpunit/phpunit": "^10.5",
+        "squizlabs/php_codesniffer": "^3.6"
+    },
+    "suggest": {
+        "glueful/payvia": "Link priced plans and project payment provider subscription events onto subscription state.",
+        "glueful/tenancy": "Resolve the current tenant for RequireEntitlement and the rate-limit tier bridge."
+    },
+    "homepage": "https://github.com/glueful/subscriptions",
+    "autoload": {
+        "psr-4": {
+            "Glueful\\Extensions\\Subscriptions\\": "src/"
+        },
+        "classmap": [
+            "migrations/"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Glueful\\Extensions\\Subscriptions\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "analyze": "vendor/bin/phpstan analyse",
+        "phpcbf": "vendor/bin/phpcbf --standard=PSR12 src",
+        "phpcs": "vendor/bin/phpcs --standard=PSR12 src",
+        "test": "vendor/bin/phpunit"
+    },
+    "extra": {
+        "glueful": {
+            "name": "Subscriptions",
+            "displayName": "Subscriptions",
+            "description": "Tenant subscriptions, plan entitlements, overrides, trials, and lifecycle sync for Glueful SaaS apps.",
+            "version": "1.0.0",
+            "categories": [
+                "billing",
+                "subscriptions"
+            ],
+            "publisher": "glueful-team",
+            "provider": "Glueful\\Extensions\\Subscriptions\\SubscriptionsServiceProvider",
+            "requires": {
+                "glueful": ">=1.54.0",
+                "extensions": []
+            }
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
