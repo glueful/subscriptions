@@ -28,18 +28,6 @@
         "phpunit/phpunit": "^10.5",
         "squizlabs/php_codesniffer": "^3.6"
     },
-    "repositories": [
-        {
-            "type": "path",
-            "url": "../../framework",
-            "options": {
-                "symlink": true,
-                "versions": {
-                    "glueful/framework": "1.54.0"
-                }
-            }
-        }
-    ],
     "suggest": {
         "glueful/payvia": "Link priced plans and project payment provider subscription events onto subscription state.",
         "glueful/tenancy": "Resolve the current tenant for RequireEntitlement and the rate-limit tier bridge."
