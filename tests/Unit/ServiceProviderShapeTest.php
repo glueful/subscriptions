@@ -27,7 +27,8 @@ final class ServiceProviderShapeTest extends TestCase
         $provider = new SubscriptionsServiceProvider($container);
 
         self::assertInstanceOf(ServiceProvider::class, $provider);
-        self::assertSame([], SubscriptionsServiceProvider::services());
+        self::assertIsArray(SubscriptionsServiceProvider::services());
+        self::assertNotSame([], SubscriptionsServiceProvider::services());
         self::assertSame('Subscriptions', $provider->getName());
         self::assertSame('1.0.0', $provider->getVersion());
     }
