@@ -18,12 +18,21 @@ use Glueful\Helpers\Utils;
  */
 final class SubscriptionService
 {
+    private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
+
+    /** Injectable payvia seam: fn(string $gateway, string $gwSubId): ?array. */
+    private readonly ?\Closure $providerStatePuller;
+
     public function __construct(
         private readonly SubscriptionRepository $subscriptions,
         private readonly SubscriptionEventRepository $events,
         private readonly PlanCatalog $catalog,
         private readonly ApplicationContext $context,
+        ?callable $providerStatePuller = null,
     ) {
+        $this->providerStatePuller = $providerStatePuller === null
+            ? null
+            : \Closure::fromCallable($providerStatePuller);
     }
 
     /** @return array<string,mixed>|null */
@@ -129,13 +138,114 @@ final class SubscriptionService
 
     /**
      * Pull authoritative provider state and re-derive local status (S8).
-     * STUB until Task 6.4 -- returns the current row unchanged.
+     *
+     * Payvia is a SOFT dependency: with no puller injected and payvia absent,
+     * this is a safe no-op returning the current row. Drift (status/period)
+     * is applied via updateByTenant and recorded as a `reconciled` event
+     * (source `reconcile`, NULL logical key -- multiple NULLs are allowed).
      *
      * @return array<string,mixed>|null
      */
     public function reconcile(string $tenantUuid): ?array
     {
+        $current = $this->current($tenantUuid);
+        if ($current === null) {
+            return null;
+        }
+
+        $gateway = (string) ($current['payvia_gateway'] ?? '');
+        $gwSubId = (string) ($current['payvia_subscription_id'] ?? '');
+        if ($gwSubId === '') {
+            return $current; // free/comp -- nothing to pull
+        }
+
+        $state = $this->pullProviderState($gateway, $gwSubId);
+        if ($state === null) {
+            return $current; // payvia absent or provider unreachable -> no-op
+        }
+
+        $changes = $this->driftChanges($current, $state);
+        if ($changes === []) {
+            return $current; // in sync -- no drift, no event
+        }
+
+        $fromStatus = (string) ($current['status'] ?? '');
+        $toStatus = (string) ($changes['status'] ?? $fromStatus);
+
+        $this->subscriptions->updateByTenant($this->context, $tenantUuid, $changes);
+
+        $this->events->append($this->context, [
+            'tenant_uuid' => $tenantUuid,
+            'type' => 'reconciled',
+            'from_status' => $fromStatus,
+            'to_status' => $toStatus,
+            'source' => 'reconcile',
+            'payvia_gateway' => $gateway !== '' ? $gateway : null,
+            'payvia_logical_event_key' => null,
+            'data' => $state,
+        ]);
+
         return $this->current($tenantUuid);
+    }
+
+    /**
+     * Resolve authoritative provider state. The injected puller wins (tests,
+     * custom wiring); otherwise the real payvia reconcile service is used only
+     * when its class exists (soft dep -- never required at compile time).
+     *
+     * @return array<string,mixed>|null
+     */
+    private function pullProviderState(string $gateway, string $gwSubId): ?array
+    {
+        if ($this->providerStatePuller !== null) {
+            $state = ($this->providerStatePuller)($gateway, $gwSubId);
+
+            return is_array($state) ? $state : null;
+        }
+
+        if (!class_exists(\Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class)) {
+            return null;
+        }
+
+        try {
+            $service = app($this->context, \Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class);
+
+            return $service->reconcile($gateway, $gwSubId);
+        } catch (\Throwable) {
+            return null; // provider/service failure degrades to "no drift applied"
+        }
+    }
+
+    /**
+     * Diff the authoritative provider state against the local row.
+     *
+     * @param array<string,mixed> $current
+     * @param array<string,mixed> $state
+     * @return array<string,mixed>
+     */
+    private function driftChanges(array $current, array $state): array
+    {
+        $changes = [];
+
+        $status = $state['status'] ?? null;
+        $status = is_scalar($status) ? strtolower((string) $status) : '';
+        if (in_array($status, self::KNOWN_STATUSES, true) && $status !== (string) ($current['status'] ?? '')) {
+            $changes['status'] = $status;
+            if ($status === 'active') {
+                $changes['grace_ends_at'] = null; // settled -> no stale grace
+            }
+        }
+
+        $periodEnd = $state['current_period_end'] ?? null;
+        if (
+            is_scalar($periodEnd)
+            && (string) $periodEnd !== ''
+            && (string) $periodEnd !== (string) ($current['current_period_end'] ?? '')
+        ) {
+            $changes['current_period_end'] = (string) $periodEnd;
+        }
+
+        return $changes;
     }
 
     /** @return array<string,mixed> */
