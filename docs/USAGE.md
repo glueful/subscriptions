@@ -45,9 +45,15 @@ built:
 | `past_due`, `grace_ends_at` in the future | the subscription's   |
 | `past_due`, grace passed or absent        | `default_plan`       |
 | `incomplete`                              | `default_plan`       |
+| `paused`                                  | `default_plan`       |
 | `canceled`                                | `default_plan`       |
 
 A lapsed tenant downgrades -- it is never locked out.
+
+`paused` is accepted from payvia's provider-status vocabulary (via
+`subscription.updated` projection or reconcile drift) and resolves to the
+default plan: a paused tenant is treated as not entitled to paid features
+until the provider resumes the subscription.
 
 ## Route middleware
 

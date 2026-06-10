@@ -1,12 +1,14 @@
 # Glueful Subscriptions
 
-Tenant subscriptions, plans, entitlements, quotas, trials, overrides, and
-lifecycle sync for Glueful SaaS apps.
+Tenant subscriptions, plans, stateless entitlements with numeric limits,
+trials, overrides, and lifecycle sync for Glueful SaaS apps.
 
 Subscriptions is a config-driven subscription lifecycle and entitlement
 resolution layer. A tenant's effective entitlement map is resolved from a plan
 catalog (config) plus per-tenant overrides (DB), gated by the subscription's
-status -- never from a live payment object.
+status -- never from a live payment object. Entitlement checks are stateless
+reads (allow/deny plus an optional numeric limit); usage metering and quota
+*consumption* are out of scope for v1 and on the roadmap (v1.1+).
 
 ## Install
 

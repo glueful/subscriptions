@@ -59,7 +59,7 @@
         }
     },
     "scripts": {
-        "analyze": "vendor/bin/phpstan analyse src",
+        "analyze": "vendor/bin/phpstan analyse",
         "phpcbf": "vendor/bin/phpcbf --standard=PSR12 src",
         "phpcs": "vendor/bin/phpcs --standard=PSR12 src",
         "test": "vendor/bin/phpunit"

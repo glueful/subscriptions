@@ -28,9 +28,11 @@ Initial release.
   resolver cache settings, `permissive_middleware`, `rate_tiers`, and the
   opt-in reconcile scheduler flag.
 - **Status-gated resolution with cache:** `EffectivePlanResolver` (lapsed /
-  incomplete / expired-grace tenants downgrade to `default_plan`; `past_due`
-  keeps paid access only while `grace_ends_at` is in the future; trials resolve
-  plan-as-trialed) + `EntitlementResolver` (catalog + overrides merge) with a
+  incomplete / paused / expired-grace tenants downgrade to `default_plan`;
+  `past_due` keeps paid access only while `grace_ends_at` is in the future;
+  trials resolve plan-as-trialed; `paused` is accepted from payvia's
+  provider-status vocabulary and treated as not entitled to paid features)
+  + `EntitlementResolver` (catalog + overrides merge) with a
   naturally-keyed cache (tenant + catalog fingerprint + row timestamps -- any
   change invalidates by key). `CacheStore` is optional; zero-infra installs
   resolve uncached.
@@ -71,6 +73,12 @@ Initial release.
   --tenant=`, `subscriptions:set-plan --tenant= --plan=` (validates the plan
   against the catalog).
 
+### Tooling
+
+- PHPStan at **level 6** via a committed `phpstan.neon` (`composer analyze` is
+  config-driven); all array docblocks carry value types. PHPUnit suite and
+  PSR-12 (`phpcs`) gates ship green.
+
 ### Guarantees
 
 - Soft dependencies only: no payvia and no tenancy class is referenced without
@@ -78,3 +86,6 @@ Initial release.
   with neither package present.
 - `tenant_uuid` is an opaque external id (no FK) -- works with any tenant
   source, not just `glueful/tenancy`.
+- Entitlement checks are stateless reads (allow/deny + optional numeric
+  limit); usage metering / quota consumption is a non-goal for v1 (roadmap:
+  v1.1+).

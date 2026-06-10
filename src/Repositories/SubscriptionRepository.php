@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 
 final class SubscriptionRepository
 {
+    /** @return array<string,mixed>|null */
     public function findByTenant(ApplicationContext $context, string $tenantUuid): ?array
     {
         return db($context)->table('subscriptions')
@@ -16,6 +17,7 @@ final class SubscriptionRepository
             ->first();
     }
 
+    /** @return array<string,mixed>|null */
     public function findByPayviaSubscription(
         ApplicationContext $context,
         string $gateway,
@@ -61,7 +63,10 @@ final class SubscriptionRepository
         return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
     }
 
-    /** @param array<string,mixed> $row */
+    /**
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
     private function normalizeJson(array $row): array
     {
         foreach (['metadata'] as $column) {

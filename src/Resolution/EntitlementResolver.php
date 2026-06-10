@@ -12,6 +12,7 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 
 final class EntitlementResolver
 {
+    /** @param CacheStore<mixed>|null $cache */
     public function __construct(
         private readonly PlanCatalog $catalog,
         private readonly SubscriptionRepository $subscriptions,
@@ -45,7 +46,10 @@ final class EntitlementResolver
         return is_array($resolved) ? $resolved : $this->resolveFresh($context, $tenantUuid, $subscription);
     }
 
-    /** @param array<string,mixed>|null $subscription */
+    /**
+     * @param array<string,mixed>|null $subscription
+     * @return array<string,mixed>
+     */
     private function resolveFresh(ApplicationContext $context, string $tenantUuid, ?array $subscription): array
     {
         $planKey = $this->planResolver->resolve(
