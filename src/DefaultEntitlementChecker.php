@@ -63,6 +63,8 @@ final class DefaultEntitlementChecker implements EntitlementCheckerInterface
             return 0;
         }
 
-        return is_numeric($value) ? (int) $value : null;
+        // S3 consistency with mapAllows(): n > 0 is the limit; n <= 0 denies,
+        // so the limit reads 0 -- never a raw negative number.
+        return is_numeric($value) ? max(0, (int) $value) : null;
     }
 }

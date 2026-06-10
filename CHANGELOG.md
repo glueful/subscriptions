@@ -13,7 +13,8 @@ Initial release.
   and is bound over core's allow-all `NullEntitlementChecker` default (relies on
   the framework container-precedence fix; requires `glueful/framework ^1.54.0`).
   S3 value semantics: absent key denies; `false`/`0` deny; `true`/explicit
-  `null` allow unlimited; positive int is the limit.
+  `null` allow unlimited; positive int is the limit; non-positive ints deny
+  with `limit() === 0` (`allows()` and `limit()` always agree).
 - **Schema (3 tables at DEPENDENT priority):** `subscriptions` (one current
   subscription per tenant, unique `tenant_uuid`, nullable `payvia_*` link
   columns, unique `(payvia_gateway, payvia_subscription_id)`),
@@ -59,7 +60,10 @@ Initial release.
 - **Reconcile (soft payvia seam):** pulls authoritative state through payvia's
   `GatewaySubscriptionService::reconcile()` only when the class exists
   (injectable puller seam for tests); applies status/period drift and appends a
-  `reconciled` event with a NULL logical key.
+  `reconciled` event with a NULL logical key. Drifting into `past_due` grants
+  the same dunning grace as the event path (`grace_ends_at = now + grace_days`;
+  an already-past_due row is never re-extended), and settling to `active`
+  clears grace.
 - **CLI:** `subscriptions:reconcile [--tenant=]`, `subscriptions:show
   --tenant=`, `subscriptions:set-plan --tenant= --plan=` (validates the plan
   against the catalog).

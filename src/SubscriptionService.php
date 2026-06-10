@@ -234,6 +234,14 @@ final class SubscriptionService
             if ($status === 'active') {
                 $changes['grace_ends_at'] = null; // settled -> no stale grace
             }
+            if ($status === 'past_due') {
+                // Entering past_due grants the SAME dunning grace as the webhook
+                // path (PaymentProviderEventListener). Already-past_due rows never
+                // reach this branch (status unchanged), so grace is never re-extended.
+                $changes['grace_ends_at'] = $this->formatForDb(
+                    new \DateTimeImmutable(sprintf('+%d days', $this->catalog->graceDays()))
+                );
+            }
         }
 
         $periodEnd = $state['current_period_end'] ?? null;
@@ -278,5 +286,11 @@ final class SubscriptionService
     private function now(): string
     {
         return db($this->context)->getDriver()->formatDateTime();
+    }
+
+    private function formatForDb(\DateTimeImmutable $dateTime): string
+    {
+        // The driver accepts \DateTime|string|null (not DateTimeImmutable).
+        return db($this->context)->getDriver()->formatDateTime(\DateTime::createFromImmutable($dateTime));
     }
 }

@@ -39,6 +39,9 @@ final class DefaultEntitlementCheckerTest extends SubscriptionsTestCase
                 'zero' => [
                     'entitlements' => ['projects.limit' => 0],
                 ],
+                'negative' => [
+                    'entitlements' => ['projects.limit' => -5],
+                ],
             ],
             'grace_days' => 3,
         ]);
@@ -58,6 +61,7 @@ final class DefaultEntitlementCheckerTest extends SubscriptionsTestCase
         $this->seedSubscription(['tenant_uuid' => 'freeT', 'plan_key' => 'free', 'status' => 'active']);
         $this->seedSubscription(['tenant_uuid' => 'proT', 'plan_key' => 'pro', 'status' => 'active']);
         $this->seedSubscription(['tenant_uuid' => 'zeroT', 'plan_key' => 'zero', 'status' => 'active']);
+        $this->seedSubscription(['tenant_uuid' => 'negativeT', 'plan_key' => 'negative', 'status' => 'active']);
         $this->seedSubscription(['tenant_uuid' => 'lapsedT', 'plan_key' => 'pro', 'status' => 'canceled']);
     }
 
@@ -103,6 +107,14 @@ final class DefaultEntitlementCheckerTest extends SubscriptionsTestCase
     {
         self::assertFalse($this->checker->allows('zeroT', 'projects.limit'));
         self::assertSame(0, $this->checker->limit('zeroT', 'projects.limit'));
+    }
+
+    public function testNegativeIntDeniesWithZeroLimit(): void
+    {
+        // S3 consistency: allows(-5) is false, so limit() must read 0 (deny),
+        // never a raw negative number.
+        self::assertFalse($this->checker->allows('negativeT', 'projects.limit'));
+        self::assertSame(0, $this->checker->limit('negativeT', 'projects.limit'));
     }
 
     public function testLapsedProTenantIsDowngradedToFree(): void

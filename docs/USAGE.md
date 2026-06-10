@@ -103,6 +103,13 @@ Reconcile pulls the authoritative provider state through payvia's
 applies status/period drift, appending a `reconciled` event (source
 `reconcile`, NULL logical key). No drift means no write and no event.
 
+Reconcile grants the **same dunning grace as the provider-event path**:
+drifting into `past_due` sets `grace_ends_at = now + grace_days`, so a tenant
+discovered late (e.g. a missed webhook) is never downgraded instantly. An
+already-`past_due` subscription never has its grace re-extended (the same
+idempotency principle the listener enforces), and settling back to `active`
+clears any grace.
+
 Scheduling is **opt-in and default-off**: `subscriptions.reconcile.schedule_enabled`
 is `false`. When you enable it, wire `subscriptions:reconcile` into your
 scheduler (cron or the framework scheduler) at the cadence you want; the
