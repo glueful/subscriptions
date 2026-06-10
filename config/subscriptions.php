@@ -22,6 +22,10 @@ return [
             ],
         ],
     ],
+    // Ordered HIGHEST-first: the paid tiers that carry a boolean rate.tier.{tier}
+    // entitlement flag (S-rl). Lower tiers (free/anonymous) are left to the
+    // framework's default TierResolver; TierManager config owns the numbers.
+    'rate_tiers' => ['enterprise', 'pro'],
     'grace_days' => 3,
     'cache' => [
         'enabled' => true,
