@@ -30,6 +30,6 @@ final class ServiceProviderShapeTest extends TestCase
         self::assertIsArray(SubscriptionsServiceProvider::services());
         self::assertNotSame([], SubscriptionsServiceProvider::services());
         self::assertSame('Subscriptions', $provider->getName());
-        self::assertSame('1.1.0', $provider->getVersion());
+        self::assertSame('1.1.1', $provider->getVersion());
     }
 }

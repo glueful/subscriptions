@@ -4,13 +4,24 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## Unreleased
 
+## 1.1.1 -- 2026-06-11
+
 ### Fixed
 
 - Load plan catalog, entitlement resolver, and subscription service factories
   through the framework extension service DSL so the provider boots through the
-  real `DefaultServicesLoader` in production.
+  real `DefaultServicesLoader` in production. (Also keeps the provider compatible
+  with the framework 1.55.0 load-time non-instantiable-binding guard.)
 - Return denied entitlement and plan-management permission checks through the
   framework `Response` error envelope instead of raw/manual JSON responses.
+
+### Changed
+
+- Require `glueful/framework ^1.55.0` (was `^1.54.0`) as the security-hardened
+  baseline. The entitlement seam and container-precedence fix this extension
+  relies on shipped in 1.54.0; 1.55.0 adds the security/correctness hardening
+  pass (permission-attribute enforcement, signed-URL fail-closed, fail-loud
+  extension loading, etc.).
 
 ## 1.1.0 -- 2026-06-10
 
