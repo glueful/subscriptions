@@ -66,11 +66,8 @@ final class RequirePlanManagementPermission implements RouteMiddleware
 
     private function forbidden(): Response
     {
-        return new Response([
-            'success' => false,
-            'message' => 'Forbidden',
-            'code' => 403,
-            'error_code' => 'FORBIDDEN',
-        ], 403);
+        return Response::error('Forbidden', Response::HTTP_FORBIDDEN, [
+            'code' => 'FORBIDDEN',
+        ]);
     }
 }
