@@ -38,8 +38,8 @@ final class SetPlanCommand extends BaseCommand
 
         $ctx = $this->getContext();
 
-        if (!PlanCatalog::fromContext($ctx)->planExists($plan)) {
-            $this->error("Unknown plan '{$plan}' -- not in the subscriptions catalog.");
+        if (!PlanCatalog::fromContext($ctx)->isAssignable($plan)) {
+            $this->error("Plan '{$plan}' is not assignable.");
             return self::FAILURE;
         }
 

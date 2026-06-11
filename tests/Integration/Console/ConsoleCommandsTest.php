@@ -12,6 +12,7 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
+use Glueful\Helpers\Utils;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 
@@ -124,6 +125,51 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         self::assertNull($this->connection()->table('subscriptions')->where('tenant_uuid', 'tenantA')->first());
     }
 
+    public function testSetPlanAcceptsActiveDbPlan(): void
+    {
+        $this->seedManagedPlan('team', 'active');
+
+        $command = new SetPlanCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute(['--tenant' => 'tenantTeam', '--plan' => 'team']);
+
+        self::assertSame(Command::SUCCESS, $exit);
+        $row = $this->connection()->table('subscriptions')->where('tenant_uuid', 'tenantTeam')->first();
+        self::assertSame('team', $row['plan_key']);
+    }
+
+    public function testSetPlanRejectsDraftDbPlan(): void
+    {
+        $this->seedManagedPlan('future', 'draft');
+
+        $command = new SetPlanCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute(['--tenant' => 'tenantFuture', '--plan' => 'future']);
+
+        self::assertSame(Command::FAILURE, $exit);
+        self::assertStringContainsString('not assignable', $tester->getDisplay());
+        self::assertNull($this->connection()->table('subscriptions')->where('tenant_uuid', 'tenantFuture')->first());
+    }
+
+    public function testSetPlanRejectsArchivedDbPlan(): void
+    {
+        $this->seedManagedPlan('legacy', 'archived');
+
+        $command = new SetPlanCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute(['--tenant' => 'tenantLegacy', '--plan' => 'legacy']);
+
+        self::assertSame(Command::FAILURE, $exit);
+        self::assertStringContainsString('not assignable', $tester->getDisplay());
+        self::assertNull($this->connection()->table('subscriptions')->where('tenant_uuid', 'tenantLegacy')->first());
+    }
+
     public function testReconcileSingleTenantNoOpReportsSuccess(): void
     {
         // Non-payvia subscription with no payvia installed: reconcile is a no-op.
@@ -169,5 +215,21 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         self::assertSame(Command::SUCCESS, $exit);
         // Only the payvia-linked subscription is iterated.
         self::assertStringContainsString('1', $tester->getDisplay());
+    }
+
+    private function seedManagedPlan(string $planKey, string $status): void
+    {
+        $this->connection()->table('subscription_plans')->insert([
+            'uuid' => Utils::generateNanoID(12),
+            'plan_key' => $planKey,
+            'display_name' => ucfirst($planKey),
+            'description' => null,
+            'entitlements' => json_encode(['projects.limit' => 25], JSON_THROW_ON_ERROR),
+            'payvia_priced_plan_uuid' => null,
+            'status' => $status,
+            'sort_order' => 10,
+            'created_at' => '2026-06-10 10:00:00',
+            'updated_at' => '2026-06-10 10:00:00',
+        ]);
     }
 }

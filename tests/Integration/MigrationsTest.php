@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 
 use Glueful\Helpers\Utils;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
+use PDO;
 
 final class MigrationsTest extends SubscriptionsTestCase
 {
@@ -16,6 +17,60 @@ final class MigrationsTest extends SubscriptionsTestCase
         self::assertTrue($schema->hasTable('subscriptions'));
         self::assertTrue($schema->hasTable('subscription_overrides'));
         self::assertTrue($schema->hasTable('subscription_events'));
+        self::assertTrue($schema->hasTable('subscription_plans'));
+    }
+
+    public function testSubscriptionPlansTableShape(): void
+    {
+        $columns = $this->subscriptionPlanColumns();
+
+        self::assertSame([
+            'id',
+            'uuid',
+            'plan_key',
+            'display_name',
+            'description',
+            'entitlements',
+            'payvia_priced_plan_uuid',
+            'status',
+            'sort_order',
+            'created_at',
+            'updated_at',
+        ], array_keys($columns));
+
+        $indexes = $this->subscriptionPlanIndexes();
+
+        self::assertTrue($this->hasUniqueIndexOn($indexes, ['uuid']));
+        self::assertTrue($this->hasUniqueIndexOn($indexes, ['plan_key']));
+        self::assertTrue($this->hasIndexOn($indexes, ['updated_at']));
+    }
+
+    public function testSubscriptionPlansUniqueKeys(): void
+    {
+        $this->seedSubscriptionPlan([
+            'uuid' => 'plan_uuid_01',
+            'plan_key' => 'pro',
+        ]);
+
+        $this->expectException(\Throwable::class);
+        $this->seedSubscriptionPlan([
+            'uuid' => 'plan_uuid_02',
+            'plan_key' => 'pro',
+        ]);
+    }
+
+    public function testSubscriptionPlanUuidIsUnique(): void
+    {
+        $this->seedSubscriptionPlan([
+            'uuid' => 'plan_uuid_01',
+            'plan_key' => 'pro',
+        ]);
+
+        $this->expectException(\Throwable::class);
+        $this->seedSubscriptionPlan([
+            'uuid' => 'plan_uuid_01',
+            'plan_key' => 'business',
+        ]);
     }
 
     public function testTenantUuidIsUniqueAndFitsOpaqueExternalIds(): void
@@ -124,5 +179,86 @@ final class MigrationsTest extends SubscriptionsTestCase
             'uuid' => Utils::generateNanoID(12),
             'payvia_gateway' => 'stripe',
         ]));
+    }
+
+    /** @return array<string,array<string,mixed>> */
+    private function subscriptionPlanColumns(): array
+    {
+        $stmt = $this->connection()->getPDO()->query('PRAGMA table_info(subscription_plans)');
+        $columns = [];
+
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
+            $columns[(string) $column['name']] = $column;
+        }
+
+        return $columns;
+    }
+
+    /**
+     * @return list<array{unique:bool,columns:list<string>}>
+     */
+    private function subscriptionPlanIndexes(): array
+    {
+        $pdo = $this->connection()->getPDO();
+        $stmt = $pdo->query('PRAGMA index_list(subscription_plans)');
+        $indexes = [];
+
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $index) {
+            $info = $pdo->query('PRAGMA index_info(' . $index['name'] . ')');
+            $indexes[] = [
+                'unique' => (bool) $index['unique'],
+                'columns' => array_map(
+                    static fn (array $row): string => (string) $row['name'],
+                    $info->fetchAll(PDO::FETCH_ASSOC)
+                ),
+            ];
+        }
+
+        return $indexes;
+    }
+
+    /**
+     * @param list<array{unique:bool,columns:list<string>}> $indexes
+     * @param list<string>                                 $columns
+     */
+    private function hasUniqueIndexOn(array $indexes, array $columns): bool
+    {
+        foreach ($indexes as $index) {
+            if ($index['unique'] && $index['columns'] === $columns) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param list<array{unique:bool,columns:list<string>}> $indexes
+     * @param list<string>                                 $columns
+     */
+    private function hasIndexOn(array $indexes, array $columns): bool
+    {
+        foreach ($indexes as $index) {
+            if ($index['columns'] === $columns) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @param array<string,mixed> $overrides */
+    private function seedSubscriptionPlan(array $overrides = []): void
+    {
+        $this->connection()->table('subscription_plans')->insert(array_merge([
+            'uuid' => Utils::generateNanoID(12),
+            'plan_key' => 'pro',
+            'display_name' => 'Pro',
+            'description' => null,
+            'entitlements' => json_encode(['projects.limit' => 10], JSON_THROW_ON_ERROR),
+            'payvia_priced_plan_uuid' => null,
+            'status' => 'active',
+            'sort_order' => 10,
+        ], $overrides));
     }
 }

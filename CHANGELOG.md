@@ -2,6 +2,18 @@
 
 All notable changes to `glueful/subscriptions` are documented here.
 
+## 1.1.0 -- 2026-06-10
+
+### Added
+
+- Managed subscription plan catalog with DB-backed plans, config fallback, HTTP
+  management API, and CLI commands.
+
+### Changed
+
+- Plan resolution now prefers active/archived DB plans over config plans while
+  keeping config as seed/fallback.
+
 ## 1.0.0 -- 2026-06-10
 
 Initial release.

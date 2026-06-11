@@ -47,6 +47,8 @@ final class SubscriptionService
      */
     public function start(string $tenantUuid, string $planKey, array $opts = []): array
     {
+        $this->assertAssignablePlan($planKey);
+
         $status = (string) ($opts['status'] ?? 'active');
 
         $row = [
@@ -81,6 +83,8 @@ final class SubscriptionService
     /** @return array<string,mixed> */
     public function changePlan(string $tenantUuid, string $planKey): array
     {
+        $this->assertAssignablePlan($planKey);
+
         $current = $this->requireCurrent($tenantUuid);
         $fromPlan = (string) ($current['plan_key'] ?? '');
 
@@ -265,6 +269,13 @@ final class SubscriptionService
         }
 
         return $row;
+    }
+
+    private function assertAssignablePlan(string $planKey): void
+    {
+        if (!$this->catalog->isAssignable($planKey)) {
+            throw new \InvalidArgumentException("Plan '{$planKey}' is not assignable.");
+        }
     }
 
     /** @return array<string,mixed> */
