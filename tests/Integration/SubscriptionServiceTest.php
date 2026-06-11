@@ -9,6 +9,7 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
+use Glueful\Helpers\Utils;
 
 /**
  * Task 6.2 -- the full no-payvia lifecycle (free/trial/comp): every path here runs
@@ -77,6 +78,31 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
         self::assertNull($stored['payvia_subscription_id']);
     }
 
+    public function testStartAcceptsActiveDbPlan(): void
+    {
+        $this->seedManagedPlan('team', 'active');
+
+        $row = $this->service->start('tenantTeam', 'team');
+
+        self::assertSame('team', $row['plan_key']);
+    }
+
+    public function testStartRejectsDraftDbPlan(): void
+    {
+        $this->seedManagedPlan('future', 'draft');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->service->start('tenantFuture', 'future');
+    }
+
+    public function testStartRejectsArchivedDbPlan(): void
+    {
+        $this->seedManagedPlan('legacy', 'archived');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->service->start('tenantLegacy', 'legacy');
+    }
+
     public function testCurrentReturnsRowOrNull(): void
     {
         self::assertNull($this->service->current('tenantA'));
@@ -104,6 +130,24 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
             ['from_plan' => 'free', 'to_plan' => 'pro'],
             json_decode((string) $events[1]['data'], true)
         );
+    }
+
+    public function testChangePlanRejectsDraftDbPlan(): void
+    {
+        $this->service->start('tenantA', 'free');
+        $this->seedManagedPlan('future', 'draft');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->service->changePlan('tenantA', 'future');
+    }
+
+    public function testChangePlanRejectsArchivedDbPlan(): void
+    {
+        $this->service->start('tenantA', 'free');
+        $this->seedManagedPlan('legacy', 'archived');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->service->changePlan('tenantA', 'legacy');
     }
 
     public function testCancelImmediateSetsCanceledStatusAndTimestamp(): void
@@ -150,5 +194,21 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
         self::assertIsArray($row);
         self::assertSame('tenantA', $row['tenant_uuid']);
         self::assertSame('free', $row['plan_key']);
+    }
+
+    private function seedManagedPlan(string $planKey, string $status): void
+    {
+        $this->connection()->table('subscription_plans')->insert([
+            'uuid' => Utils::generateNanoID(12),
+            'plan_key' => $planKey,
+            'display_name' => ucfirst($planKey),
+            'description' => null,
+            'entitlements' => json_encode(['projects.limit' => 25], JSON_THROW_ON_ERROR),
+            'payvia_priced_plan_uuid' => null,
+            'status' => $status,
+            'sort_order' => 10,
+            'created_at' => '2026-06-10 10:00:00',
+            'updated_at' => '2026-06-10 10:00:00',
+        ]);
     }
 }
