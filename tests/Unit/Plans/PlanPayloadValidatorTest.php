@@ -29,7 +29,7 @@ final class PlanPayloadValidatorTest extends TestCase
                 'reports.export' => true,
                 'support.priority' => null,
             ],
-            'payvia_priced_plan_uuid' => 'pricedPlan001',
+            'payvia_priced_plan_uuid' => 'price1234567',
             'status' => 'active',
             'sort_order' => 20,
         ];
@@ -54,6 +54,24 @@ final class PlanPayloadValidatorTest extends TestCase
         ]));
 
         self::assertSame([], $validated['entitlements']);
+    }
+
+    public function testRejectsEntitlementKeysLongerThan128Characters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'entitlements' => [str_repeat('a', 129) => true],
+        ]));
+    }
+
+    public function testRejectsPayviaPricedPlanUuidThatIsNot12Characters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'payvia_priced_plan_uuid' => 'too-long-price-id',
+        ]));
     }
 
     /**

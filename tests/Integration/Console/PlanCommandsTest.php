@@ -93,6 +93,22 @@ final class PlanCommandsTest extends SubscriptionsTestCase
         self::assertStringContainsString('non-negative', $tester->getDisplay());
     }
 
+    public function testCreateRejectsMalformedEntitlementsJsonCleanly(): void
+    {
+        $command = new CreatePlanCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute([
+            '--key' => 'team',
+            '--name' => 'Team',
+            '--entitlements' => '{"projects.limit":',
+        ]);
+
+        self::assertSame(Command::FAILURE, $exit);
+        self::assertStringContainsString('valid JSON', $tester->getDisplay());
+    }
+
     public function testUpdateChangesEntitlementsAndRejectsActiveToDraft(): void
     {
         $this->createPlan('team');
@@ -113,6 +129,23 @@ final class PlanCommandsTest extends SubscriptionsTestCase
 
         self::assertSame(Command::FAILURE, $exit);
         self::assertStringContainsString('draft', $tester->getDisplay());
+    }
+
+    public function testUpdateRejectsMalformedEntitlementsJsonCleanly(): void
+    {
+        $this->createPlan('team');
+
+        $command = new UpdatePlanCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute([
+            '--key' => 'team',
+            '--entitlements' => '{"projects.limit":',
+        ]);
+
+        self::assertSame(Command::FAILURE, $exit);
+        self::assertStringContainsString('valid JSON', $tester->getDisplay());
     }
 
     public function testUpdateRejectsArchivedToDraft(): void

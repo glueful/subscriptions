@@ -11,6 +11,7 @@ use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
+use Glueful\Extensions\Subscriptions\Tests\Support\FakePermissionManager;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Permissions\PermissionManager;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -58,7 +59,9 @@ final class PlanControllerTest extends SubscriptionsTestCase
 
     public function testCreateValidatesPayloadAndReturnsCreatedRow(): void
     {
-        $response = $this->controller->store($this->jsonRequest('POST', '/subscriptions/plans', $this->payload('team')));
+        $response = $this->controller->store(
+            $this->jsonRequest('POST', '/subscriptions/plans', $this->payload('team'))
+        );
         $data = $this->json($response);
 
         self::assertSame(201, $response->getStatusCode());
@@ -121,6 +124,21 @@ final class PlanControllerTest extends SubscriptionsTestCase
 
     public function testPermissionMiddlewareReturns403WhenManagerUnavailable(): void
     {
+        $middleware = new RequirePlanManagementPermission($this->appContext());
+        $request = Request::create('/');
+        $request->attributes->set('auth.user', new UserIdentity('user-1'));
+
+        $response = $middleware->handle($request, static fn (): string => 'next');
+
+        self::assertSame(403, $response->getStatusCode());
+    }
+
+    public function testPermissionMiddlewareReturns403WithRealManagerAndNoProvider(): void
+    {
+        $manager = new PermissionManager();
+        $manager->clearProvider();
+        $this->bind(PermissionManager::class, $manager);
+
         $middleware = new RequirePlanManagementPermission($this->appContext());
         $request = Request::create('/');
         $request->attributes->set('auth.user', new UserIdentity('user-1'));
@@ -198,23 +216,5 @@ final class PlanControllerTest extends SubscriptionsTestCase
         $decoded = json_decode((string) $response->getContent(), true);
 
         return is_array($decoded) ? $decoded : [];
-    }
-}
-
-final class FakePermissionManager extends PermissionManager
-{
-    /** @var list<mixed> */
-    public array $lastCall = [];
-
-    public function __construct(private bool $allowed)
-    {
-    }
-
-    /** @param array<string,mixed> $context */
-    public function can(string $userUuid, string $permission, string $resource, array $context = []): bool
-    {
-        $this->lastCall = [$userUuid, $permission, $resource, $context];
-
-        return $this->allowed;
     }
 }

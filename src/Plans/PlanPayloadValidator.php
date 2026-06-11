@@ -9,6 +9,8 @@ use InvalidArgumentException;
 final class PlanPayloadValidator
 {
     private const PLAN_KEY_PATTERN = '/\A[a-z0-9._-]{1,64}\z/';
+    private const ENTITLEMENT_KEY_MAX_LENGTH = 128;
+    private const PAYVIA_PRICED_PLAN_UUID_LENGTH = 12;
 
     /**
      * @param array<string,mixed> $payload
@@ -27,9 +29,8 @@ final class PlanPayloadValidator
             'display_name' => $this->validateDisplayName($payload['display_name']),
             'description' => $this->nullableString($payload['description'] ?? null, 'description'),
             'entitlements' => $this->validateEntitlements($payload['entitlements']),
-            'payvia_priced_plan_uuid' => $this->nullableString(
+            'payvia_priced_plan_uuid' => $this->validatePayviaPricedPlanUuid(
                 $payload['payvia_priced_plan_uuid'] ?? null,
-                'payvia_priced_plan_uuid'
             ),
             'status' => $this->validateStatus($payload['status']),
             'sort_order' => $this->validateSortOrder($payload['sort_order'] ?? 0),
@@ -62,9 +63,8 @@ final class PlanPayloadValidator
         }
 
         if (array_key_exists('payvia_priced_plan_uuid', $payload)) {
-            $validated['payvia_priced_plan_uuid'] = $this->nullableString(
+            $validated['payvia_priced_plan_uuid'] = $this->validatePayviaPricedPlanUuid(
                 $payload['payvia_priced_plan_uuid'],
-                'payvia_priced_plan_uuid'
             );
         }
 
@@ -156,6 +156,12 @@ final class PlanPayloadValidator
                 throw new InvalidArgumentException('entitlement keys must be non-empty strings.');
             }
 
+            if (strlen($key) > self::ENTITLEMENT_KEY_MAX_LENGTH) {
+                throw new InvalidArgumentException(
+                    'entitlement keys must be 128 characters or fewer.'
+                );
+            }
+
             if (!is_bool($grant) && !is_int($grant) && $grant !== null) {
                 throw new InvalidArgumentException("entitlement {$key} must be bool, non-negative int, or null.");
             }
@@ -168,6 +174,20 @@ final class PlanPayloadValidator
         }
 
         return $entitlements;
+    }
+
+    private function validatePayviaPricedPlanUuid(mixed $value): ?string
+    {
+        $uuid = $this->nullableString($value, 'payvia_priced_plan_uuid');
+        if ($uuid === null) {
+            return null;
+        }
+
+        if (strlen($uuid) !== self::PAYVIA_PRICED_PLAN_UUID_LENGTH) {
+            throw new InvalidArgumentException('payvia_priced_plan_uuid must be 12 characters.');
+        }
+
+        return $uuid;
     }
 
     private function validateStatus(mixed $value): string

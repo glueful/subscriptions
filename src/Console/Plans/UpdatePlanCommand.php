@@ -98,7 +98,12 @@ final class UpdatePlanCommand extends BaseCommand
             throw new \InvalidArgumentException('entitlements JSON is required.');
         }
 
-        $decoded = json_decode($json, true, flags: JSON_THROW_ON_ERROR);
+        try {
+            $decoded = json_decode($json, true, flags: JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new \InvalidArgumentException('entitlements must be valid JSON.', 0, $e);
+        }
+
         if (!is_array($decoded)) {
             throw new \InvalidArgumentException('entitlements must decode to an object/map.');
         }

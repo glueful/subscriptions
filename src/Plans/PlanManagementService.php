@@ -47,7 +47,10 @@ final class PlanManagementService
             throw $e;
         }
 
-        return $this->findOrFail((string) $validated['plan_key']);
+        $created = $this->findOrFail((string) $validated['plan_key']);
+        $this->emitAudit($this->auditPayload((string) $validated['plan_key'], 'created', [], $created));
+
+        return $created;
     }
 
     /**
@@ -56,9 +59,24 @@ final class PlanManagementService
      */
     public function update(string $planKey, array $payload): array
     {
+        return $this->updateWithAction($planKey, $payload, 'updated');
+    }
+
+    /** @return array<string,mixed> */
+    public function archive(string $planKey): array
+    {
+        return $this->updateWithAction($planKey, ['status' => 'archived'], 'archived');
+    }
+
+    /**
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
+    private function updateWithAction(string $planKey, array $payload, string $action): array
+    {
         $audit = null;
 
-        $row = db($this->context)->transaction(function () use ($planKey, $payload, &$audit): array {
+        $row = db($this->context)->transaction(function () use ($planKey, $payload, $action, &$audit): array {
             $before = $this->findOrFail($planKey);
             $changes = $this->validator->validatePatch($payload, $before);
             $changes['updated_at'] = $this->now();
@@ -66,7 +84,7 @@ final class PlanManagementService
             $this->plans->updateByKey($this->context, $planKey, $changes);
 
             $after = $this->findOrFail($planKey);
-            $audit = $this->auditPayload($planKey, 'updated', $before, $after);
+            $audit = $this->auditPayload($planKey, $action, $before, $after);
 
             return $after;
         });
@@ -76,12 +94,6 @@ final class PlanManagementService
         }
 
         return $row;
-    }
-
-    /** @return array<string,mixed> */
-    public function archive(string $planKey): array
-    {
-        return $this->update($planKey, ['status' => 'archived']);
     }
 
     /** @return list<array<string,mixed>> */

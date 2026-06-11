@@ -7,8 +7,8 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
+use Glueful\Extensions\Subscriptions\Tests\Support\CapturingLogger;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
-use Psr\Log\AbstractLogger;
 use Psr\Log\LoggerInterface;
 
 final class PlanManagementServiceTest extends SubscriptionsTestCase
@@ -101,6 +101,20 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         self::assertSame('team', $subscription['plan_key']);
     }
 
+    public function testCreateAuditCapturesCreatedAction(): void
+    {
+        $logger = new CapturingLogger();
+        $this->bind(LoggerInterface::class, $logger);
+
+        $this->service->create($this->payload('team'));
+
+        self::assertSame('subscriptions.plan_changed', $logger->records[0]['message']);
+        self::assertSame('team', $logger->records[0]['context']['plan_key']);
+        self::assertSame('created', $logger->records[0]['context']['action']);
+        self::assertSame([], $logger->records[0]['context']['before']);
+        self::assertSame('team', $logger->records[0]['context']['after']['plan_key']);
+    }
+
     public function testImportConfigCreatesMissingPlansWithoutOverwritingExistingRows(): void
     {
         $this->service->create(array_merge($this->payload('pro'), [
@@ -135,6 +149,7 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         $logger = new CapturingLogger();
         $this->bind(LoggerInterface::class, $logger);
         $this->service->create($this->payload('team'));
+        $logger->records = [];
 
         $this->service->update('team', ['display_name' => 'Team Plus']);
 
@@ -149,6 +164,22 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         );
     }
 
+    public function testArchiveAuditCapturesArchivedAction(): void
+    {
+        $logger = new CapturingLogger();
+        $this->bind(LoggerInterface::class, $logger);
+        $this->service->create($this->payload('team'));
+        $logger->records = [];
+
+        $this->service->archive('team');
+
+        self::assertSame('subscriptions.plan_changed', $logger->records[0]['message']);
+        self::assertSame('team', $logger->records[0]['context']['plan_key']);
+        self::assertSame('archived', $logger->records[0]['context']['action']);
+        self::assertSame('active', $logger->records[0]['context']['before']['status']);
+        self::assertSame('archived', $logger->records[0]['context']['after']['status']);
+    }
+
     public function testMissingLoggerDoesNotFail(): void
     {
         $this->service->create($this->payload('team'));
@@ -156,21 +187,5 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         $row = $this->service->update('team', ['display_name' => 'Team Plus']);
 
         self::assertSame('Team Plus', $row['display_name']);
-    }
-}
-
-final class CapturingLogger extends AbstractLogger
-{
-    /** @var list<array{level:mixed,message:string,context:array<string,mixed>}> */
-    public array $records = [];
-
-    /** @param array<string,mixed> $context */
-    public function log($level, string|\Stringable $message, array $context = []): void
-    {
-        $this->records[] = [
-            'level' => $level,
-            'message' => (string) $message,
-            'context' => $context,
-        ];
     }
 }
