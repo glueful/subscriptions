@@ -3,12 +3,12 @@
 Tenant subscriptions, plans, stateless entitlements with numeric limits,
 trials, overrides, and lifecycle sync for Glueful SaaS apps.
 
-Subscriptions is a config-driven subscription lifecycle and entitlement
-resolution layer. A tenant's effective entitlement map is resolved from a plan
-catalog (config) plus per-tenant overrides (DB), gated by the subscription's
-status -- never from a live payment object. Entitlement checks are stateless
-reads (allow/deny plus an optional numeric limit); usage metering and quota
-*consumption* are out of scope for v1 and on the roadmap (v1.1+).
+Subscriptions is a subscription lifecycle and entitlement resolution layer. A
+tenant's effective entitlement map is resolved from a plan catalog plus
+per-tenant overrides, gated by the subscription's status -- never from a live
+payment object. Entitlement checks are stateless reads (allow/deny plus an
+optional numeric limit); usage metering and quota *consumption* are out of
+scope and on the roadmap.
 
 ## Install
 
@@ -108,7 +108,38 @@ The gate fails closed: no resolvable tenant means 403 unless
 `subscriptions.permissive_middleware` is `true`. A denied entitlement returns
 403 with an `entitlement` error code so clients can prompt an upgrade.
 
-## Plan catalog (config/subscriptions.php)
+## Plan catalog
+
+The catalog has two sources:
+
+- Managed DB plans in `subscription_plans`.
+- Config plans in `config/subscriptions.php` as seed/fallback.
+
+Resolution prefers DB rows with status `active` or `archived`. If a DB row is
+`draft`, it does not resolve and config is used when a config plan with the same
+key exists. If neither source resolves, the entitlement map is empty and every
+key denies.
+
+An empty `subscription_plans` table is safe: config plans keep working. If a DB
+is wiped, tenants on config-backed keys continue resolving from config; DB-only
+plan keys resolve to an empty map until restored. If migration 004 has not run
+yet, catalog reads catch the missing table and behave as config-only.
+
+Plan assignment is stricter than plan resolution:
+
+| Plan source/status | Resolves for existing tenants | Assignable to new tenants |
+| ------------------ | ----------------------------- | ------------------------- |
+| DB `active`        | yes                           | yes                       |
+| DB `archived`      | yes                           | no                        |
+| DB `draft`         | no                            | no                        |
+| config only        | yes                           | yes                       |
+
+Archived is never delete: tenants already on an archived plan keep resolving it.
+Draft is pre-publish only; active and archived plans cannot transition back to
+draft. An empty entitlement map `{}` is valid and means "deny every entitlement
+key."
+
+### Config seed (config/subscriptions.php)
 
 ```php
 return [
@@ -214,13 +245,42 @@ re-projects -- grace can never be extended twice. The tenant mapping is
 `(gateway, gateway_subscription_id)`; on `subscription.created` an unlinked row
 can be recovered via provider metadata `tenant_uuid`.
 
+## Managed plan API
+
+Plan management routes are permission gated with `auth` plus
+`subscriptions_plans_manage`, which calls `PermissionManager::can()` directly
+for `subscriptions.plans.manage` on `subscriptions.plans` and fails closed.
+
+```text
+GET    /subscriptions/plans
+POST   /subscriptions/plans
+POST   /subscriptions/plans/import-config
+GET    /subscriptions/plans/{key}
+PATCH  /subscriptions/plans/{key}
+POST   /subscriptions/plans/{key}/archive
+```
+
+`{key}` accepts lowercase letters, numbers, dot, underscore, and hyphen. The
+reserved key `import-config` is rejected for plans so the collection import
+route cannot collide with a plan key.
+
 ## CLI
 
 ```bash
 php glueful subscriptions:show --tenant=<uuid>
 php glueful subscriptions:set-plan --tenant=<uuid> --plan=pro
 php glueful subscriptions:reconcile [--tenant=<uuid>]
+php glueful subscriptions:plans:create --key=pro --name="Pro" --entitlements='{"reports.export":true}'
+php glueful subscriptions:plans:update --key=pro --status=archived
+php glueful subscriptions:plans:archive --key=pro
+php glueful subscriptions:plans:import-config [--force]
+php glueful subscriptions:plans:list
 ```
+
+`subscriptions:plans:import-config` seeds the DB catalog from
+`config/subscriptions.php`. Without `--force`, existing DB rows are left alone.
+With `--force`, config entitlements and Payvia priced-plan links overwrite the
+existing DB row.
 
 Reconcile pulls the authoritative provider state through payvia's
 `GatewaySubscriptionService::reconcile($gateway, $gatewaySubscriptionId)` and
