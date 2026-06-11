@@ -8,11 +8,16 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\DefaultEntitlementChecker;
+use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
+use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
 use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
+use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
+use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
+use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
@@ -52,6 +57,11 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
             SubscriptionRepository::class,
             OverrideRepository::class,
             SubscriptionEventRepository::class,
+            SubscriptionPlanRepository::class,
+            PlanPayloadValidator::class,
+            PlanManagementService::class,
+            RequirePlanManagementPermission::class,
+            PlanController::class,
             EffectivePlanResolver::class,
             PaymentProviderEventListener::class,
             ] as $id
@@ -73,8 +83,15 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         self::assertIsArray($middleware);
         self::assertContains('require_entitlement', $middleware['alias']);
 
+        $planMiddleware = $services[RequirePlanManagementPermission::class] ?? null;
+        self::assertIsArray($planMiddleware);
+        self::assertContains('subscriptions_plans_manage', $planMiddleware['alias']);
+
         self::assertSame(
-            ['require_entitlement' => RequireEntitlement::class],
+            [
+                'require_entitlement' => RequireEntitlement::class,
+                'subscriptions_plans_manage' => RequirePlanManagementPermission::class,
+            ],
             SubscriptionsServiceProvider::middlewareAliases()
         );
     }

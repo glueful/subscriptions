@@ -10,7 +10,9 @@ use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
+use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
 use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
@@ -141,6 +143,17 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'autowire' => true,
                 'alias' => ['require_entitlement'],
             ],
+            RequirePlanManagementPermission::class => [
+                'class' => RequirePlanManagementPermission::class,
+                'shared' => true,
+                'autowire' => true,
+                'alias' => ['subscriptions_plans_manage'],
+            ],
+            PlanController::class => [
+                'class' => PlanController::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
             // Registered as a service so the '@serviceId' lazy listener resolves.
             PaymentProviderEventListener::class => [
                 'class' => PaymentProviderEventListener::class,
@@ -153,7 +166,10 @@ final class SubscriptionsServiceProvider extends ServiceProvider
     /** @return array<string, class-string> */
     public static function middlewareAliases(): array
     {
-        return ['require_entitlement' => RequireEntitlement::class];
+        return [
+            'require_entitlement' => RequireEntitlement::class,
+            'subscriptions_plans_manage' => RequirePlanManagementPermission::class,
+        ];
     }
 
     public function getName(): string
@@ -195,6 +211,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         }
 
         $this->discoverCommands('Glueful\\Extensions\\Subscriptions\\Console', __DIR__ . '/Console');
+        $this->loadRoutesFrom(__DIR__ . '/../routes.php');
 
         // S7: project payvia provider events onto subscription state -- but ONLY
         // when payvia is installed (soft dep). Lazy '@serviceId' listener so the
