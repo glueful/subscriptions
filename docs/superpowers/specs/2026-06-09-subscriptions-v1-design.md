@@ -1,8 +1,8 @@
 # Subscriptions v1 -- Tenant Subscriptions & Entitlements -- Design Note
 
-**Status:** Design locked; ready for implementation planning. All decisions (S-ns, S-id, S-rl, S1-S12) resolved -- see Decisions. Reflects the entitlement seam's **promotion to framework core** (contract consumed, not shipped here). Boundary-inherited decisions are in **Resolved up front**. No code yet.
+**Status:** Design locked; implemented and verified in `glueful/subscriptions` v1. All decisions (S-ns, S-id, S-rl, S1-S12) resolved -- see Decisions. Reflects the entitlement seam's **promotion to framework core** (contract consumed, not shipped here). Boundary-inherited decisions are in **Resolved up front**.
 **Date:** 2026-06-09
-**Repo:** `glueful/subscriptions` (standalone, greenfield -- only a README today). This spec is self-contained.
+**Repo:** `glueful/subscriptions` (standalone extension). This spec is self-contained.
 **Companions:** Consumes the **locked** Payvia v-next contract (`payvia/docs/superpowers/specs/2026-06-09-payvia-vnext-design.md`). The cross-cutting parent is the framework boundary note (`framework/docs/superpowers/specs/2026-06-08-subscriptions-payvia-boundary-design.md`); this spec restates the constraints it needs so it stands alone.
 
 ---

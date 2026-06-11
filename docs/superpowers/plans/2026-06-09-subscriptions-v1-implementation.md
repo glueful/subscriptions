@@ -1,5 +1,7 @@
 # Subscriptions v1 Implementation Plan
 
+**Status:** Executed and verified. The implementation passes PHPUnit, PSR-12 phpcs, PHPStan, Composer validation, and PHP syntax checks.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the greenfield `glueful/subscriptions` extension -- a config-driven tenant subscription lifecycle and entitlement-resolution layer that exposes `EntitlementCheckerInterface`, works fully with no `glueful/payvia` and no `glueful/tenancy` installed, and projects Payvia provider events onto tenant subscription state when Payvia is present.
