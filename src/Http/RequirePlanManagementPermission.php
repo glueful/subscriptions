@@ -6,9 +6,9 @@ namespace Glueful\Extensions\Subscriptions\Http;
 
 use Glueful\Auth\UserIdentity;
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Http\Response;
 use Glueful\Permissions\PermissionManager;
 use Glueful\Routing\RouteMiddleware;
-use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 final class RequirePlanManagementPermission implements RouteMiddleware
@@ -64,9 +64,9 @@ final class RequirePlanManagementPermission implements RouteMiddleware
         return null;
     }
 
-    private function forbidden(): JsonResponse
+    private function forbidden(): Response
     {
-        return new JsonResponse([
+        return new Response([
             'success' => false,
             'message' => 'Forbidden',
             'code' => 403,
