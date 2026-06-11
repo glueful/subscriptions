@@ -1,6 +1,6 @@
 # Glueful Subscriptions
 
-Tenant subscriptions, plans, stateless entitlements with numeric limits,
+Tenant subscriptions, plans, and stateless entitlements with numeric limits,
 trials, overrides, and lifecycle sync for Glueful SaaS apps.
 
 Subscriptions is a subscription lifecycle and entitlement resolution layer. A
