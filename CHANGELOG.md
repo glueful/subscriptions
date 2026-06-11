@@ -2,6 +2,14 @@
 
 All notable changes to `glueful/subscriptions` are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Load plan catalog, entitlement resolver, and subscription service factories
+  through the framework extension service DSL so the provider boots through the
+  real `DefaultServicesLoader` in production.
+
 ## 1.1.0 -- 2026-06-10
 
 ### Added
