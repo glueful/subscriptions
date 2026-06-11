@@ -12,9 +12,12 @@ use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
 use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
+use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
+use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
+use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
@@ -79,6 +82,21 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             ],
             SubscriptionEventRepository::class => [
                 'class' => SubscriptionEventRepository::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            SubscriptionPlanRepository::class => [
+                'class' => SubscriptionPlanRepository::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            PlanPayloadValidator::class => [
+                'class' => PlanPayloadValidator::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            PlanManagementService::class => [
+                'class' => PlanManagementService::class,
                 'shared' => true,
                 'autowire' => true,
             ],
