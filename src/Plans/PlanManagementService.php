@@ -18,7 +18,10 @@ final class PlanManagementService
     ) {
     }
 
-    /** @param array<string,mixed> $payload @return array<string,mixed> */
+    /**
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
     public function create(array $payload): array
     {
         $validated = $this->validator->validateCreate($payload);
@@ -47,7 +50,10 @@ final class PlanManagementService
         return $this->findOrFail((string) $validated['plan_key']);
     }
 
-    /** @param array<string,mixed> $payload @return array<string,mixed> */
+    /**
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
     public function update(string $planKey, array $payload): array
     {
         $audit = null;
@@ -185,9 +191,6 @@ final class PlanManagementService
     private function resolveLogger(): ?LoggerInterface
     {
         $container = $this->context->getContainer();
-        if ($container === null) {
-            return null;
-        }
 
         foreach ([LoggerInterface::class, 'logger'] as $id) {
             try {

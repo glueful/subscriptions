@@ -72,7 +72,9 @@ final class CreatePlanCommand extends BaseCommand
     private function entitlements(InputInterface $input): array
     {
         $file = $this->nullableStringOption($input, 'entitlements-file');
-        $json = $file !== null ? (string) @file_get_contents($file) : $this->nullableStringOption($input, 'entitlements');
+        $json = $file !== null
+            ? (string) @file_get_contents($file)
+            : $this->nullableStringOption($input, 'entitlements');
         if ($json === null || $json === '') {
             throw new \InvalidArgumentException('entitlements JSON is required.');
         }

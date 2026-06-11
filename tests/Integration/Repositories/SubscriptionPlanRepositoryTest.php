@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration\Repositories;
 
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
+use Glueful\Helpers\Utils;
 
 final class SubscriptionPlanRepositoryTest extends SubscriptionsTestCase
 {
@@ -21,7 +22,7 @@ final class SubscriptionPlanRepositoryTest extends SubscriptionsTestCase
     private function plan(array $overrides = []): array
     {
         return array_merge([
-            'uuid' => 'plan_' . substr(md5((string) microtime(true)), 0, 7),
+            'uuid' => Utils::generateNanoID(12),
             'plan_key' => 'pro',
             'display_name' => 'Pro',
             'description' => 'Professional plan',

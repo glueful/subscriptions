@@ -32,12 +32,14 @@ final class UpdatePlanCommand extends BaseCommand
             $key = $this->stringOption($input, 'key');
             $payload = [];
 
-            foreach ([
-                'name' => 'display_name',
-                'description' => 'description',
-                'status' => 'status',
-                'payvia-priced-plan' => 'payvia_priced_plan_uuid',
-            ] as $option => $field) {
+            foreach (
+                [
+                    'name' => 'display_name',
+                    'description' => 'description',
+                    'status' => 'status',
+                    'payvia-priced-plan' => 'payvia_priced_plan_uuid',
+                ] as $option => $field
+            ) {
                 $value = $this->nullableStringOption($input, $option);
                 if ($value !== null) {
                     $payload[$field] = $value;
@@ -49,7 +51,8 @@ final class UpdatePlanCommand extends BaseCommand
                 $payload['sort_order'] = (int) $sortOrder;
             }
 
-            if ($this->nullableStringOption($input, 'entitlements') !== null
+            if (
+                $this->nullableStringOption($input, 'entitlements') !== null
                 || $this->nullableStringOption($input, 'entitlements-file') !== null
             ) {
                 $payload['entitlements'] = $this->entitlements($input);
@@ -88,7 +91,9 @@ final class UpdatePlanCommand extends BaseCommand
     private function entitlements(InputInterface $input): array
     {
         $file = $this->nullableStringOption($input, 'entitlements-file');
-        $json = $file !== null ? (string) @file_get_contents($file) : $this->nullableStringOption($input, 'entitlements');
+        $json = $file !== null
+            ? (string) @file_get_contents($file)
+            : $this->nullableStringOption($input, 'entitlements');
         if ($json === null || $json === '') {
             throw new \InvalidArgumentException('entitlements JSON is required.');
         }

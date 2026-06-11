@@ -47,9 +47,6 @@ final class RequirePlanManagementPermission implements RouteMiddleware
     private function permissionManager(): ?PermissionManager
     {
         $container = $this->context->getContainer();
-        if ($container === null) {
-            return null;
-        }
 
         foreach ([PermissionManager::class, 'permission.manager'] as $id) {
             try {

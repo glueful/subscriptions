@@ -49,7 +49,10 @@ final class PlanController extends BaseController
     public function update(Request $request, string $key): Response
     {
         try {
-            return $this->success(['plan' => $this->plans->update($key, $this->normalizeBody($request))], 'Plan updated');
+            return $this->success(
+                ['plan' => $this->plans->update($key, $this->normalizeBody($request))],
+                'Plan updated'
+            );
         } catch (\InvalidArgumentException $e) {
             if ($this->plans->find($key) === null) {
                 return $this->notFound('Plan not found');

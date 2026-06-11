@@ -10,7 +10,10 @@ final class PlanPayloadValidator
 {
     private const PLAN_KEY_PATTERN = '/\A[a-z0-9._-]{1,64}\z/';
 
-    /** @param array<string,mixed> $payload @return array<string,mixed> */
+    /**
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
     public function validateCreate(array $payload): array
     {
         foreach (['plan_key', 'display_name', 'entitlements', 'status'] as $field) {
@@ -79,7 +82,10 @@ final class PlanPayloadValidator
         return $validated;
     }
 
-    /** @param array<string,mixed> $configPlan @return array<string,mixed> */
+    /**
+     * @param array<string,mixed> $configPlan
+     * @return array<string,mixed>
+     */
     public function validateImportConfigPlan(string $planKey, array $configPlan, string $status): array
     {
         $pricedPlan = $configPlan['payvia_priced_plan_uuid']
