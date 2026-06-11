@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Container\Definition\FactoryDefinition;
+use Glueful\Container\Loader\DefaultServicesLoader;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\DefaultEntitlementChecker;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
@@ -70,9 +71,43 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
             self::assertTrue($services[$id]['shared']);
         }
 
-        self::assertInstanceOf(FactoryDefinition::class, $services[PlanCatalog::class] ?? null);
-        self::assertInstanceOf(FactoryDefinition::class, $services[EntitlementResolver::class] ?? null);
-        self::assertInstanceOf(FactoryDefinition::class, $services[SubscriptionService::class] ?? null);
+        foreach ([PlanCatalog::class, EntitlementResolver::class, SubscriptionService::class] as $id) {
+            self::assertIsArray($services[$id] ?? null, "Missing factory service definition: {$id}");
+            self::assertArrayHasKey('factory', $services[$id]);
+            self::assertTrue($services[$id]['shared']);
+        }
+    }
+
+    public function testServicesLoadThroughRealDefaultServicesLoaderInProductionMode(): void
+    {
+        $loader = new DefaultServicesLoader();
+
+        $definitions = $loader->load(
+            SubscriptionsServiceProvider::services(),
+            SubscriptionsServiceProvider::class,
+            prod: true
+        );
+
+        self::assertInstanceOf(FactoryDefinition::class, $definitions[PlanCatalog::class] ?? null);
+        self::assertInstanceOf(FactoryDefinition::class, $definitions[EntitlementResolver::class] ?? null);
+        self::assertInstanceOf(FactoryDefinition::class, $definitions[SubscriptionService::class] ?? null);
+        self::assertArrayHasKey(\Glueful\Entitlements\Contracts\EntitlementCheckerInterface::class, $definitions);
+        self::assertArrayHasKey('require_entitlement', $definitions);
+    }
+
+    public function testRealDefaultServicesLoaderRejectsClosureFactoriesInProductionMode(): void
+    {
+        $loader = new DefaultServicesLoader();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('factory closure not allowed in production');
+
+        $loader->load([
+            'bad.factory' => [
+                'factory' => static fn(): object => new \stdClass(),
+                'shared' => true,
+            ],
+        ], SubscriptionsServiceProvider::class, prod: true);
     }
 
     public function testRequireEntitlementCarriesMiddlewareAlias(): void
@@ -105,7 +140,11 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         $this->bind(SubscriptionEventRepository::class, new SubscriptionEventRepository());
         $this->bind(EffectivePlanResolver::class, new EffectivePlanResolver());
 
-        $services = SubscriptionsServiceProvider::services();
+        $services = (new DefaultServicesLoader())->load(
+            SubscriptionsServiceProvider::services(),
+            SubscriptionsServiceProvider::class,
+            prod: true
+        );
         $container = $this->appContext()->getContainer();
 
         /** @var FactoryDefinition $catalogDef */

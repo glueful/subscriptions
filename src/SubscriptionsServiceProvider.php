@@ -6,7 +6,6 @@ namespace Glueful\Extensions\Subscriptions;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Cache\CacheStore;
-use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
@@ -67,11 +66,10 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'autowire' => true,
             ],
             // Config-driven -- built from the resolved context, hence a factory.
-            PlanCatalog::class => new FactoryDefinition(
-                PlanCatalog::class,
-                static fn(ContainerInterface $c): PlanCatalog =>
-                    PlanCatalog::fromContext($c->get(ApplicationContext::class))
-            ),
+            PlanCatalog::class => [
+                'factory' => [self::class, 'makePlanCatalog'],
+                'shared' => true,
+            ],
             SubscriptionRepository::class => [
                 'class' => SubscriptionRepository::class,
                 'shared' => true,
@@ -109,34 +107,16 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             ],
             // Reads subscriptions.cache config; CacheStore is OPTIONAL (B3) --
             // a zero-infra install resolves uncached.
-            EntitlementResolver::class => new FactoryDefinition(
-                EntitlementResolver::class,
-                static function (ContainerInterface $c): EntitlementResolver {
-                    $context = $c->get(ApplicationContext::class);
-                    $cacheConfig = (array) config($context, 'subscriptions.cache', []);
-
-                    return new EntitlementResolver(
-                        $c->get(PlanCatalog::class),
-                        $c->get(SubscriptionRepository::class),
-                        $c->get(OverrideRepository::class),
-                        $c->get(EffectivePlanResolver::class),
-                        $c->has(CacheStore::class) ? $c->get(CacheStore::class) : null,
-                        (bool) ($cacheConfig['enabled'] ?? true),
-                        (int) ($cacheConfig['ttl'] ?? 300),
-                    );
-                }
-            ),
+            EntitlementResolver::class => [
+                'factory' => [self::class, 'makeEntitlementResolver'],
+                'shared' => true,
+            ],
             // Explicit factory: the optional payvia puller seam stays at its
             // default (the service itself resolves payvia via class_exists).
-            SubscriptionService::class => new FactoryDefinition(
-                SubscriptionService::class,
-                static fn(ContainerInterface $c): SubscriptionService => new SubscriptionService(
-                    $c->get(SubscriptionRepository::class),
-                    $c->get(SubscriptionEventRepository::class),
-                    $c->get(PlanCatalog::class),
-                    $c->get(ApplicationContext::class),
-                )
-            ),
+            SubscriptionService::class => [
+                'factory' => [self::class, 'makeSubscriptionService'],
+                'shared' => true,
+            ],
             RequireEntitlement::class => [
                 'class' => RequireEntitlement::class,
                 'shared' => true,
@@ -161,6 +141,37 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'autowire' => true,
             ],
         ];
+    }
+
+    public static function makePlanCatalog(ContainerInterface $c): PlanCatalog
+    {
+        return PlanCatalog::fromContext($c->get(ApplicationContext::class));
+    }
+
+    public static function makeEntitlementResolver(ContainerInterface $c): EntitlementResolver
+    {
+        $context = $c->get(ApplicationContext::class);
+        $cacheConfig = (array) config($context, 'subscriptions.cache', []);
+
+        return new EntitlementResolver(
+            $c->get(PlanCatalog::class),
+            $c->get(SubscriptionRepository::class),
+            $c->get(OverrideRepository::class),
+            $c->get(EffectivePlanResolver::class),
+            $c->has(CacheStore::class) ? $c->get(CacheStore::class) : null,
+            (bool) ($cacheConfig['enabled'] ?? true),
+            (int) ($cacheConfig['ttl'] ?? 300),
+        );
+    }
+
+    public static function makeSubscriptionService(ContainerInterface $c): SubscriptionService
+    {
+        return new SubscriptionService(
+            $c->get(SubscriptionRepository::class),
+            $c->get(SubscriptionEventRepository::class),
+            $c->get(PlanCatalog::class),
+            $c->get(ApplicationContext::class),
+        );
     }
 
     /** @return array<string, class-string> */

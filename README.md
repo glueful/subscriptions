@@ -18,8 +18,9 @@ php glueful extensions:enable subscriptions
 php glueful migrate:run
 ```
 
-Requires `glueful/framework ^1.54.0` (the release that ships the
-`Glueful\Entitlements` seam and the container-precedence fix).
+Requires `glueful/framework ^1.55.0`. (The `Glueful\Entitlements` seam and the
+container-precedence fix this extension relies on shipped in 1.54.0; 1.55.0 is
+required as the security-hardened baseline.)
 
 ## The decoupling invariant
 
