@@ -9,6 +9,8 @@ All notable changes to `glueful/subscriptions` are documented here.
 - Load plan catalog, entitlement resolver, and subscription service factories
   through the framework extension service DSL so the provider boots through the
   real `DefaultServicesLoader` in production.
+- Return denied entitlement checks through the framework `Response` envelope
+  instead of a raw Symfony `JsonResponse`.
 
 ## 1.1.0 -- 2026-06-10
 
