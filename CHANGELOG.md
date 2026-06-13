@@ -46,6 +46,17 @@ All notable changes to `glueful/subscriptions` are documented here.
   delayed creation event can no longer flip a terminal subscription back to
   active.
 
+### Changed
+
+- Read plan write payloads (`store`/`update`) from the JSON body and POST form
+  only -- query-string params are no longer merged into the body. Validation
+  already gated every field, so this is a logging-hygiene change: plan fields
+  (e.g. `entitlements`/`status`) passed via the query string for a write are no
+  longer copied into the request body (and thus access logs). `importConfig`
+  reads its `force`/`status` query params explicitly and is unaffected. Callers
+  that relied on passing plan write fields via the query string must move them
+  into the request body.
+
 ## 1.1.1 -- 2026-06-11
 
 ### Fixed
