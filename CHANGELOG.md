@@ -6,6 +6,13 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ### Fixed
 
+- Harden boot/registration against partial failures. Each independent
+  registration step (migrations, command discovery, route loading, and the
+  optional payvia event listener) is now wrapped in its own try/catch that logs
+  a `[Subscriptions] ...` message and re-throws outside production -- so a single
+  failing step degrades gracefully in production instead of aborting app boot,
+  while still failing fast during development. The existing `registerMeta` guard
+  is unchanged.
 - Fail closed when an entitlement value has an unrecognized type. Plan values are
   validated (`bool` | `int >= 0` | `null`) but override values are JSON-decoded
   and unvalidated, so a malformed value could reach the checker. `allows()` now

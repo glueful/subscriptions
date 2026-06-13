@@ -201,11 +201,19 @@ final class SubscriptionsServiceProvider extends ServiceProvider
     public function register(ApplicationContext $context): void
     {
         $this->mergeConfig('subscriptions', require __DIR__ . '/../config/subscriptions.php');
-        $this->loadMigrationsFrom(
-            __DIR__ . '/../migrations',
-            MigrationPriority::DEPENDENT,
-            'glueful/subscriptions'
-        );
+
+        try {
+            $this->loadMigrationsFrom(
+                __DIR__ . '/../migrations',
+                MigrationPriority::DEPENDENT,
+                'glueful/subscriptions'
+            );
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to register migrations: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
+        }
     }
 
     public function boot(ApplicationContext $context): void
@@ -221,17 +229,44 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             error_log('[Subscriptions] Failed to register extension metadata: ' . $e->getMessage());
         }
 
-        $this->discoverCommands('Glueful\\Extensions\\Subscriptions\\Console', __DIR__ . '/Console');
-        $this->loadRoutesFrom(__DIR__ . '/../routes.php');
+        try {
+            $this->discoverCommands('Glueful\\Extensions\\Subscriptions\\Console', __DIR__ . '/Console');
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to discover commands: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
+        }
+
+        try {
+            $this->loadRoutesFrom(__DIR__ . '/../routes.php');
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to load routes: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
+        }
 
         // S7: project payvia provider events onto subscription state -- but ONLY
         // when payvia is installed (soft dep). Lazy '@serviceId' listener so the
         // projection pipeline is constructed on first dispatch, not at boot.
-        if (class_exists(\Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class)) {
-            app($context, \Glueful\Events\EventService::class)->addListener(
-                \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,
-                '@' . PaymentProviderEventListener::class
-            );
+        try {
+            if (class_exists(\Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class)) {
+                app($context, \Glueful\Events\EventService::class)->addListener(
+                    \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,
+                    '@' . PaymentProviderEventListener::class
+                );
+            }
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to register payvia event listener: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
         }
+    }
+
+    private function bootEnv(): string
+    {
+        return (string) ($_ENV['APP_ENV'] ?? (getenv('APP_ENV') !== false ? getenv('APP_ENV') : 'production'));
     }
 }
