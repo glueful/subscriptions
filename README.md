@@ -154,7 +154,7 @@ return [
             ],
         ],
         'pro' => [
-            'payvia_priced_plan' => null, // optional payvia billing-plan uuid
+            'provider_price_id' => null, // optional provider price/plan id
             'entitlements' => [
                 'reports.export' => true,
                 'projects.limit' => 50,
@@ -183,7 +183,7 @@ use Glueful\Extensions\Subscriptions\SubscriptionService;
 
 $service = app($context, SubscriptionService::class);
 
-// Free/comp/trial -- no payvia object needed, all payvia_* columns stay NULL.
+// Free/comp/trial -- no provider object needed, all provider_* columns stay NULL.
 $service->start($tenantUuid, 'free');
 $service->start($tenantUuid, 'pro', [
     'status' => 'trialing',
@@ -194,12 +194,12 @@ $service->current($tenantUuid);          // ?array (the subscriptions row)
 $service->changePlan($tenantUuid, 'pro');
 $service->cancel($tenantUuid);                       // at period end (metadata flag)
 $service->cancel($tenantUuid, atPeriodEnd: false);   // immediate: status=canceled
-$service->reconcile($tenantUuid);        // pull provider truth, when payvia is installed
+$service->reconcile($tenantUuid);        // pull provider truth, when a provider puller is bound
 ```
 
 Every transition appends a `subscription_events` row (`created`,
 `plan_changed`, `canceled`, `reconciled`, or provider event types) with
-`from_status` / `to_status` / `source` (`manual`, `payvia_event`,
+`from_status` / `to_status` / `source` (`manual`, `provider_event`,
 `reconcile`).
 
 ## Rate-limit tier bridge
@@ -213,12 +213,16 @@ without tenancy.
 
 ## Consumes Payvia (when installed)
 
-Subscriptions *consumes* payvia; payvia stays tenancy-agnostic:
+Payvia is the **first-party default** and needs zero wiring. It is just one
+provider, though: any payment package (or your own app) can drive subscription
+state through the same generic seam — see
+[docs/BRING_YOUR_OWN_PROVIDER.md](docs/BRING_YOUR_OWN_PROVIDER.md). Subscriptions
+*consumes* payvia; payvia stays tenancy-agnostic:
 
-- **Priced plans:** a catalog plan may point at a payvia billing plan via
-  `payvia_priced_plan`.
+- **Priced plans:** a catalog plan may point at a provider price/plan via
+  `provider_price_id`.
 - **Provider events:** when `Glueful\Extensions\Payvia\Events\PaymentProviderEvent`
-  exists, a listener self-registers in `boot()` and projects normalized provider
+  exists, a thin bridge self-registers as a listener in `boot()` and projects normalized provider
   events (`subscription.created/updated/past_due/canceled`, `payment.succeeded`,
   `invoice.paid`) onto subscription status -- claim-first in one transaction with
   per-gateway logical-event-key dedupe DB-enforced by a unique index, so a
@@ -240,7 +244,7 @@ Provider-event projection maps:
 | `invoice.paid`          | same settle path                                      |
 
 Idempotency is claim-first: the `subscription_events` insert (unique per
-`(payvia_gateway, payvia_logical_event_key)`) and the projection run in one
+`(provider_gateway, provider_logical_event_key)`) and the projection run in one
 transaction, so a duplicate or concurrent delivery rolls back and never
 re-projects -- grace can never be extended twice. The tenant mapping is
 `(gateway, gateway_subscription_id)`; on `subscription.created` an unlinked row
@@ -280,7 +284,7 @@ php glueful subscriptions:plans:list
 
 `subscriptions:plans:import-config` seeds the DB catalog from
 `config/subscriptions.php`. Without `--force`, existing DB rows are left alone.
-With `--force`, config entitlements and Payvia priced-plan links overwrite the
+With `--force`, config entitlements and provider price-id links overwrite the
 existing DB row.
 
 Reconcile pulls the authoritative provider state through payvia's

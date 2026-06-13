@@ -213,7 +213,7 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         $exit = $tester->execute([]);
 
         self::assertSame(Command::SUCCESS, $exit);
-        // Only the payvia-linked subscription is iterated.
+        // Only the provider-linked subscription is iterated.
         self::assertStringContainsString('1', $tester->getDisplay());
     }
 

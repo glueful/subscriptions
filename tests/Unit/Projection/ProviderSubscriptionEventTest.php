@@ -9,7 +9,7 @@ use PHPUnit\Framework\TestCase;
 
 final class ProviderSubscriptionEventTest extends TestCase
 {
-    public function test_exposes_readonly_fields(): void
+    public function testExposesReadonlyFields(): void
     {
         $event = new ProviderSubscriptionEvent(
             gateway: 'stripe',

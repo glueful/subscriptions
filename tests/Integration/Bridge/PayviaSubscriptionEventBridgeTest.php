@@ -26,7 +26,7 @@ final class SpyProjector implements SubscriptionEventProjectorInterface
 
 final class PayviaSubscriptionEventBridgeTest extends TestCase
 {
-    public function test_adapts_payvia_event_shape_into_one_projector_call(): void
+    public function testAdaptsPayviaEventShapeIntoOneProjectorCall(): void
     {
         $projector = new SpyProjector();
 
@@ -68,7 +68,7 @@ final class PayviaSubscriptionEventBridgeTest extends TestCase
         self::assertSame('sub_1', $projector->captured[0]->normalized['gateway_subscription_id']);
     }
 
-    public function test_ignores_event_without_inner_object(): void
+    public function testIgnoresEventWithoutInnerObject(): void
     {
         $projector = new SpyProjector();
         (new PayviaSubscriptionEventBridge($projector))(new class {

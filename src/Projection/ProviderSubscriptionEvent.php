@@ -6,7 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Projection;
 
 /**
  * Generic, provider-agnostic input to the subscription event projector.
- * Bridges (payvia or third-party) adapt their provider's event into this DTO.
+ * Provider bridges adapt their provider's event into this DTO.
  */
 final class ProviderSubscriptionEvent
 {

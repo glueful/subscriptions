@@ -32,7 +32,7 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
  * Task 7.1 -- provider registrations: the two core-seam overrides (checker over
  * core's Null default, tier resolver over the framework default -- both rely on
  * the container-precedence last-wins fix), factories, middleware alias, commands,
- * and the class_exists-guarded payvia listener.
+ * and the class_exists-guarded payvia bridge.
  */
 final class ServiceProviderWiringTest extends SubscriptionsTestCase
 {

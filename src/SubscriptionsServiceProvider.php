@@ -294,7 +294,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 );
             }
         } catch (\Throwable $e) {
-            error_log('[Subscriptions] Failed to register payvia event listener: ' . $e->getMessage());
+            error_log('[Subscriptions] Failed to register payvia event bridge: ' . $e->getMessage());
             if ($this->bootEnv() !== 'production') {
                 throw $e; // fail fast in non-production
             }

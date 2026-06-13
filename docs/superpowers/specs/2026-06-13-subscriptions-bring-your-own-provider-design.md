@@ -188,12 +188,19 @@ After implementation, `payvia` (case-insensitive) may appear **only** in:
 - comments / docs that specifically describe the Payvia adapter;
 - payvia-specific adapter test fixtures (e.g. a fake that emulates payvia's `->event` wrapper shape).
 
-Subscriptions **domain models, repositories, migrations, config, public method options, CLI flags, docs, and tests** must use `provider_*`. Reviewer check:
+Subscriptions **domain models, repositories, migrations, config, public method options, CLI flags, user-facing docs, and tests** must use `provider_*`.
 
+**Scope of the gate:** live surfaces (`src/ config/ migrations/ routes.php tests/`) and the current user-facing docs (`README.md`, `docs/BRING_YOUR_OWN_PROVIDER.md`). It deliberately **excludes `docs/superpowers/`** — those plans/specs are historical records of this work and legitimately quote the old `payvia_*` names and the rename mapping.
+
+The hard, runnable invariant — no renamed snake_case identifier survives anywhere in scope:
 ```
-grep -rin payvia src/ config/ migrations/ routes.php tests/ docs/ \
-  | grep -viE 'Bridge/Payvia|PayviaSubscriptionEventBridge|PayviaProviderStatePuller|class_exists\(.*Payvia|// .*Payvia|Payvia adapter|FakePayvia'
-# → expected: no remaining matches
+grep -rinE 'payvia_[a-z]' src/ config/ migrations/ routes.php tests/ README.md docs/BRING_YOUR_OWN_PROVIDER.md
+# → expected: no matches
+```
+The softer guideline — bare `payvia` mentions in scope may remain ONLY for: the two adapter class files (`PayviaSubscriptionEventBridge`, `PayviaProviderStatePuller`) and their soft-dep registration in `SubscriptionsServiceProvider` (incl. its `error_log`/comments); payvia-adapter test fixtures and test method names (e.g. `FakePaymentProviderEvent`, `…PayviaAbsent…`); and README/BYOP prose naming payvia as the first-party default. Reviewer eyeballs the remainder:
+```
+grep -rin payvia src/ config/ migrations/ routes.php tests/ README.md docs/BRING_YOUR_OWN_PROVIDER.md \
+  | grep -viE 'Bridge/Payvia|PayviaSubscriptionEventBridge|PayviaProviderStatePuller|class_exists\(.*Payvia|Payvia\\(Events|Services)|payviaEvent|register payvia event|FakePayvia|FakePaymentProviderEvent|Payvia (adapter|bridge|listener|absent)|payvia (is|stays|installed|object|billing|provider)|consumes payvia|no .*payvia|Consumes Payvia'
 ```
 
 ## 6. Normalized event vocabulary (the BYOP contract)
