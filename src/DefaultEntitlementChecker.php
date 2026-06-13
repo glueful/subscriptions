@@ -50,7 +50,11 @@ final class DefaultEntitlementChecker implements EntitlementCheckerInterface
             return (int) $value > 0;
         }
 
-        return (bool) $value;
+        // Fail closed: plan values are validated (bool|int>=0|null) but override
+        // values are JSON-decoded and unvalidated. An unrecognized type (string,
+        // array, object) -- e.g. the JSON string "false" which (bool) would
+        // coerce to true -- denies rather than wrongly grants.
+        return false;
     }
 
     private function mapLimit(mixed $value): ?int
@@ -63,8 +67,15 @@ final class DefaultEntitlementChecker implements EntitlementCheckerInterface
             return 0;
         }
 
-        // S3 consistency with mapAllows(): n > 0 is the limit; n <= 0 denies,
-        // so the limit reads 0 -- never a raw negative number.
-        return is_numeric($value) ? max(0, (int) $value) : null;
+        if (is_numeric($value)) {
+            // S3 consistency with mapAllows(): n > 0 is the limit; n <= 0 denies,
+            // so the limit reads 0 -- never a raw negative number.
+            return max(0, (int) $value);
+        }
+
+        // Fail closed: an unrecognized type (string, array, object) from an
+        // unvalidated override denies (limit 0) rather than reading as unlimited.
+        // Explicit null above stays unlimited -- that is intentional.
+        return 0;
     }
 }

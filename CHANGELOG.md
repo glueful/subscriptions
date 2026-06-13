@@ -6,6 +6,13 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ### Fixed
 
+- Fail closed when an entitlement value has an unrecognized type. Plan values are
+  validated (`bool` | `int >= 0` | `null`) but override values are JSON-decoded
+  and unvalidated, so a malformed value could reach the checker. `allows()` now
+  denies (and `limit()` returns `0`) for any non-bool/non-numeric/non-null type --
+  previously the JSON string `"false"` `(bool)`-coerced to a grant and an
+  unrecognized type read as an unlimited (`null`) limit. The intentional
+  `null = unlimited/allow` semantics are unchanged.
 - Derive the entitlement cache key from the resolved content rather than from
   `updated_at` timestamps. The key now folds in a stable hash of the
   resolved-plan inputs (`status`, `plan_key`, `grace_ends_at`) and of the active
