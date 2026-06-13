@@ -29,26 +29,6 @@ final class OverrideRepository
         return $overrides;
     }
 
-    public function maxUpdatedAt(ApplicationContext $context, string $tenantUuid): ?string
-    {
-        $now = db($context)->getDriver()->formatDateTime();
-        $rows = db($context)->table('subscription_overrides')
-            ->where('tenant_uuid', '=', $tenantUuid)
-            ->whereRaw('(expires_at IS NULL OR expires_at > ?)', [$now])
-            ->orderBy(['updated_at' => 'DESC', 'created_at' => 'DESC'])
-            ->limit(1)
-            ->get();
-
-        $row = $rows[0] ?? null;
-        if (!is_array($row)) {
-            return null;
-        }
-
-        $value = $row['updated_at'] ?? $row['created_at'] ?? null;
-
-        return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
-    }
-
     private function decode(mixed $value): mixed
     {
         if (!is_string($value)) {

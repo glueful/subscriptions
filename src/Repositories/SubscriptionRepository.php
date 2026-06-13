@@ -55,14 +55,6 @@ final class SubscriptionRepository
             ->get();
     }
 
-    /** @param array<string,mixed> $row */
-    public function latestUpdatedAt(array $row): ?string
-    {
-        $value = $row['updated_at'] ?? $row['created_at'] ?? null;
-
-        return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
-    }
-
     /**
      * @param array<string,mixed> $row
      * @return array<string,mixed>

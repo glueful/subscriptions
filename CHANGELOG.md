@@ -6,6 +6,14 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ### Fixed
 
+- Derive the entitlement cache key from the resolved content rather than from
+  `updated_at` timestamps. The key now folds in a stable hash of the
+  resolved-plan inputs (`status`, `plan_key`, `grace_ends_at`) and of the active
+  override map, so a status/plan downgrade or an override edit invalidates the
+  cache immediately even when a writer fails to bump `updated_at` -- closing a
+  window (up to the cache TTL) in which a downgraded tenant kept elevated
+  entitlements. The active override map is now read once and reused for both the
+  key and the merge (no extra query).
 - Only relink unlinked tenant subscriptions on provider `subscription.created`
   events. The provider-echoed `metadata.tenant_uuid` is now treated as a recovery
   HINT used solely to attach an as-yet-unlinked subscription -- never to move an
