@@ -9,6 +9,7 @@ use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Tests\Support\CapturingLogger;
 use Glueful\Extensions\Subscriptions\Tests\Support\FakePaymentProviderEvent;
 use Glueful\Extensions\Subscriptions\Tests\Support\FakeProviderEvent;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
@@ -240,6 +241,88 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         self::assertSame('sub_NEW', $row['payvia_subscription_id']);
         self::assertSame('active', $row['status']);
         self::assertSame(1, $this->eventCount());
+    }
+
+    public function testSubscriptionCreatedDoesNotMoveAnAlreadyLinkedTenant(): void
+    {
+        // Tenant row is already linked to a DIFFERENT provider subscription.
+        // A subscription.created naming this tenant via metadata must NOT steal
+        // the link, must NOT project a status change, and must record no event.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'active',
+            'payvia_gateway' => 'paystack',
+            'payvia_subscription_id' => 'sub_EXISTING',
+        ]);
+
+        $logger = new CapturingLogger();
+        $this->bind('logger', $logger);
+
+        $this->dispatch('subscription.created', 'k1', [
+            'gateway_subscription_id' => 'sub_ATTACKER',
+            'status' => 'active',
+            'metadata' => ['tenant_uuid' => 'tenantA'],
+        ]);
+
+        $row = $this->subscription();
+        // Link is UNCHANGED -- the original provider subscription id survives.
+        self::assertSame('sub_EXISTING', $row['payvia_subscription_id']);
+        self::assertSame('paystack', $row['payvia_gateway']);
+        self::assertSame('active', $row['status']);
+        // No projection, no recorded event.
+        self::assertSame(0, $this->eventCount());
+
+        // The anomaly is logged as a warning without leaking the payload.
+        self::assertCount(1, $logger->records);
+        self::assertSame('warning', $logger->records[0]['level']);
+        self::assertSame(
+            'subscriptions.relink_conflict_skipped',
+            $logger->records[0]['context']['event']
+        );
+        self::assertSame('tenantA', $logger->records[0]['context']['tenant_uuid']);
+        self::assertSame('sub_EXISTING', $logger->records[0]['context']['existing_subscription_id']);
+        self::assertSame('sub_ATTACKER', $logger->records[0]['context']['incoming_subscription_id']);
+    }
+
+    public function testSubscriptionCreatedWithoutMetadataTenantUuidNoOps(): void
+    {
+        // Unlinked tenant row, but the created event carries no metadata hint:
+        // nothing to recover -> graceful no-op, no event recorded.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'incomplete',
+        ]);
+
+        $this->dispatch('subscription.created', 'k1', [
+            'gateway_subscription_id' => 'sub_NEW',
+            'status' => 'active',
+        ]);
+
+        $row = $this->subscription();
+        self::assertSame('incomplete', $row['status']);
+        self::assertEmpty($row['payvia_subscription_id'] ?? null);
+        self::assertSame(0, $this->eventCount());
+    }
+
+    public function testSubscriptionCreatedForUnknownTenantNoOps(): void
+    {
+        // metadata names a tenant that has no subscription row -> no-op.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'incomplete',
+        ]);
+
+        $this->dispatch('subscription.created', 'k1', [
+            'gateway_subscription_id' => 'sub_NEW',
+            'status' => 'active',
+            'metadata' => ['tenant_uuid' => 'ghostTenant'],
+        ]);
+
+        self::assertSame('incomplete', $this->subscription('tenantA')['status']);
+        self::assertSame(0, $this->eventCount());
     }
 
     public function testSubscriptionCanceledProjectsCanceledAt(): void

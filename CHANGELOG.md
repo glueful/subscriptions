@@ -4,6 +4,16 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Only relink unlinked tenant subscriptions on provider `subscription.created`
+  events. The provider-echoed `metadata.tenant_uuid` is now treated as a recovery
+  HINT used solely to attach an as-yet-unlinked subscription -- never to move an
+  existing link. A `subscription.created` naming a tenant whose row is already
+  linked to a different provider subscription is logged as an anomaly
+  (`subscriptions.relink_conflict_skipped`, no payload) and no-ops instead of
+  silently stealing the link.
+
 ## 1.1.1 -- 2026-06-11
 
 ### Fixed

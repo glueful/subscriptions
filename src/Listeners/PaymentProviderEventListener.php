@@ -135,8 +135,17 @@ final class PaymentProviderEventListener
 
     /**
      * Map provider (gateway, gateway_subscription_id) -> tenant subscription row.
-     * On subscription.created an unlinked row can be recovered via the provider
+     * On subscription.created an UNLINKED row can be recovered via the provider
      * metadata's tenant_uuid -- writing BOTH payvia_gateway and payvia_subscription_id.
+     *
+     * SECURITY: `metadata.tenant_uuid` flows verbatim from the provider webhook
+     * payload (payvia passes provider metadata through unmodified), so it is NOT a
+     * trust anchor. It is used here only as a RECOVERY HINT to attach an
+     * as-yet-unlinked subscription to its tenant -- never to MOVE an existing link
+     * from one provider subscription to another. A row that is already linked is
+     * left untouched (a mismatch is logged as an anomaly and no-ops). The real
+     * trust anchor would be a server-issued correlation token round-tripped through
+     * the provider, which is an app-side concern and out of scope here.
      *
      * @param array<string,mixed> $normalized
      * @return array<string,mixed>|null
@@ -164,6 +173,37 @@ final class PaymentProviderEventListener
 
         $existing = $this->subscriptions->findByTenant($this->context, $tenantUuid);
         if ($existing === null) {
+            return null;
+        }
+
+        // Only attach when the target row is NOT already linked. We must never
+        // overwrite an existing provider link based on provider-echoed metadata.
+        $existingSubId = $existing['payvia_subscription_id'] ?? null;
+        $existingSubId = is_scalar($existingSubId) ? (string) $existingSubId : '';
+
+        if ($existingSubId !== '') {
+            $existingGateway = is_scalar($existing['payvia_gateway'] ?? null)
+                ? (string) $existing['payvia_gateway']
+                : '';
+
+            // Already linked to THIS exact (gateway, sub id): a no-op relink --
+            // return the row so projection proceeds normally. (Defensive: the
+            // findByPayviaSubscription lookup above would already have matched it.)
+            if ($existingGateway === $gateway && $existingSubId === $gwSubId) {
+                return $existing;
+            }
+
+            // Already linked to a DIFFERENT provider subscription: refuse to move
+            // the link. Log the anomaly (no payload) and no-op gracefully.
+            $this->resolveLogger()?->warning('Provider relink conflict skipped', [
+                'event' => 'subscriptions.relink_conflict_skipped',
+                'tenant_uuid' => $tenantUuid,
+                'existing_gateway' => $existingGateway,
+                'existing_subscription_id' => $existingSubId,
+                'incoming_gateway' => $gateway,
+                'incoming_subscription_id' => $gwSubId,
+            ]);
+
             return null;
         }
 
