@@ -186,6 +186,44 @@ final class PlanPayloadValidatorTest extends TestCase
         );
     }
 
+    public function testCreateAcceptsDescriptionOf255Characters(): void
+    {
+        $validated = $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'description' => str_repeat('a', 255),
+        ]));
+
+        self::assertSame(str_repeat('a', 255), $validated['description']);
+    }
+
+    public function testCreateRejectsDescriptionLongerThan255Characters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'description' => str_repeat('a', 256),
+        ]));
+    }
+
+    public function testPatchRejectsDescriptionLongerThan255Characters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validatePatch(
+            ['description' => str_repeat('a', 256)],
+            $this->validPayload()
+        );
+    }
+
+    public function testPatchAcceptsDescriptionOf255Characters(): void
+    {
+        $validated = $this->validator->validatePatch(
+            ['description' => str_repeat('a', 255)],
+            $this->validPayload()
+        );
+
+        self::assertSame(str_repeat('a', 255), $validated['description']);
+    }
+
     public function testCreateNormalizesDefaults(): void
     {
         $payload = $this->validPayload();

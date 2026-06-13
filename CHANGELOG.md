@@ -13,6 +13,11 @@ All notable changes to `glueful/subscriptions` are documented here.
   failing step degrades gracefully in production instead of aborting app boot,
   while still failing fast during development. The existing `registerMeta` guard
   is unchanged.
+- Cap plan `description` at 255 characters in the payload validator (matching the
+  `subscription_plans.description` `VARCHAR(255)` column) on both the create and
+  patch paths. An over-long description now raises a clean validation error (HTTP
+  422) instead of a confusing 500 (strict MySQL) or silent truncation. Only
+  `description` is capped; other `nullableString` fields are unaffected.
 - Fail closed when an entitlement value has an unrecognized type. Plan values are
   validated (`bool` | `int >= 0` | `null`) but override values are JSON-decoded
   and unvalidated, so a malformed value could reach the checker. `allows()` now

@@ -10,6 +10,7 @@ final class PlanPayloadValidator
 {
     private const PLAN_KEY_PATTERN = '/\A[a-z0-9._-]{1,64}\z/';
     private const ENTITLEMENT_KEY_MAX_LENGTH = 128;
+    private const DESCRIPTION_MAX_LENGTH = 255;
     private const PAYVIA_PRICED_PLAN_UUID_LENGTH = 12;
 
     /**
@@ -27,7 +28,11 @@ final class PlanPayloadValidator
         return [
             'plan_key' => $this->validatePlanKey((string) $payload['plan_key']),
             'display_name' => $this->validateDisplayName($payload['display_name']),
-            'description' => $this->nullableString($payload['description'] ?? null, 'description'),
+            'description' => $this->nullableString(
+                $payload['description'] ?? null,
+                'description',
+                self::DESCRIPTION_MAX_LENGTH,
+            ),
             'entitlements' => $this->validateEntitlements($payload['entitlements']),
             'payvia_priced_plan_uuid' => $this->validatePayviaPricedPlanUuid(
                 $payload['payvia_priced_plan_uuid'] ?? null,
@@ -55,7 +60,11 @@ final class PlanPayloadValidator
         }
 
         if (array_key_exists('description', $payload)) {
-            $validated['description'] = $this->nullableString($payload['description'], 'description');
+            $validated['description'] = $this->nullableString(
+                $payload['description'],
+                'description',
+                self::DESCRIPTION_MAX_LENGTH,
+            );
         }
 
         if (array_key_exists('entitlements', $payload)) {
@@ -130,7 +139,7 @@ final class PlanPayloadValidator
         return $displayName;
     }
 
-    private function nullableString(mixed $value, string $field): ?string
+    private function nullableString(mixed $value, string $field, ?int $maxLength = null): ?string
     {
         if ($value === null || $value === '') {
             return null;
@@ -140,7 +149,12 @@ final class PlanPayloadValidator
             throw new InvalidArgumentException("{$field} must be a string or null.");
         }
 
-        return (string) $value;
+        $string = (string) $value;
+        if ($maxLength !== null && strlen($string) > $maxLength) {
+            throw new InvalidArgumentException("{$field} must be {$maxLength} characters or fewer.");
+        }
+
+        return $string;
     }
 
     /** @return array<string,bool|int|null> */
