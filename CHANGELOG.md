@@ -4,6 +4,17 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## Unreleased
 
+### Added
+
+- Provider-agnostic subscription event projection. A new
+  `SubscriptionEventProjectorInterface` + `ProviderSubscriptionEvent` DTO own all
+  projection rules (claim-first idempotency, tenant relink, the status state
+  machine, period/grace), and a `ProviderStatePullerInterface` drives reconcile.
+  Third-party payment providers can now project subscription state and reconcile
+  drift by mapping their events into the DTO and (optionally) binding their own
+  puller -- with no payvia present and no subscriptions internals touched. See
+  `docs/BRING_YOUR_OWN_PROVIDER.md`.
+
 ### Fixed
 
 - Harden boot/registration against partial failures. Each independent
@@ -56,6 +67,26 @@ All notable changes to `glueful/subscriptions` are documented here.
   reads its `force`/`status` query params explicitly and is unaffected. Callers
   that relied on passing plan write fields via the query string must move them
   into the request body.
+- Payvia is now a thin optional integration rather than the projection owner. The
+  former `PaymentProviderEventListener` (which both adapted payvia's event shape
+  AND owned the projection rules) is replaced by a generic
+  `SubscriptionEventProjector` plus a thin `PayviaSubscriptionEventBridge`
+  (event adapter) and `PayviaProviderStatePuller` (reconcile adapter), each
+  registered only when payvia is installed. All subscriptions-owned `payvia_*`
+  storage/options/config/CLI vocabulary is renamed to `provider_*`:
+  `provider_gateway`, `provider_customer_id`, `provider_subscription_id`,
+  `provider_price_id` (generalized from the 12-char `payvia_priced_plan_uuid` to
+  a `VARCHAR(191)` provider price/plan identifier), and
+  `provider_logical_event_key`; the event `source` value `payvia_event` becomes
+  `provider_event`, the unique index `uniq_subscriptions_payvia_sub` becomes
+  `uniq_subscriptions_provider_sub`, and the plan CLI flag `--payvia-priced-plan`
+  becomes `--provider-price-id`. No backward-compat shim or dual-read (the
+  extension is pre-release); the columns are renamed directly in the base
+  migrations.
+- An unknown provider event type that maps to an existing subscription is now
+  recorded (the idempotency claim is taken) with no projected status change,
+  instead of being dropped before the claim. This keeps every delivered event
+  auditable and idempotent even when its type is not in the handled set.
 
 ## 1.1.1 -- 2026-06-11
 
