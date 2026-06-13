@@ -240,7 +240,7 @@ final class SubscriptionService
             }
             if ($status === 'past_due') {
                 // Entering past_due grants the SAME dunning grace as the webhook
-                // path (PaymentProviderEventListener). Already-past_due rows never
+                // path (SubscriptionEventProjector). Already-past_due rows never
                 // reach this branch (status unchanged), so grace is never re-extended.
                 $changes['grace_ends_at'] = $this->formatForDb(
                     new \DateTimeImmutable(sprintf('+%d days', $this->catalog->graceDays()))

@@ -8,13 +8,15 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Cache\CacheStore;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\ServiceProvider;
+use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
 use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
-use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
+use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
 use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
@@ -134,9 +136,14 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'shared' => true,
                 'autowire' => true,
             ],
+            SubscriptionEventProjectorInterface::class => [
+                'class' => SubscriptionEventProjector::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
             // Registered as a service so the '@serviceId' lazy listener resolves.
-            PaymentProviderEventListener::class => [
-                'class' => PaymentProviderEventListener::class,
+            PayviaSubscriptionEventBridge::class => [
+                'class' => PayviaSubscriptionEventBridge::class,
                 'shared' => true,
                 'autowire' => true,
             ],
@@ -254,7 +261,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             if (class_exists(\Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class)) {
                 app($context, \Glueful\Events\EventService::class)->addListener(
                     \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,
-                    '@' . PaymentProviderEventListener::class
+                    '@' . PayviaSubscriptionEventBridge::class
                 );
             }
         } catch (\Throwable $e) {
