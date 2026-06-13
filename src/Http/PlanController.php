@@ -94,7 +94,16 @@ final class PlanController extends BaseController
         }
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Build the write payload from the JSON body and POST form only.
+     *
+     * Query-string params are intentionally NOT merged in: for write actions
+     * they would otherwise carry plan fields (entitlements/status) into access
+     * logs. `importConfig` reads its `force`/`status` query params explicitly, so
+     * it is unaffected by this exclusion.
+     *
+     * @return array<string,mixed>
+     */
     private function normalizeBody(Request $request): array
     {
         $content = $request->getContent();
@@ -103,6 +112,6 @@ final class PlanController extends BaseController
             $data = [];
         }
 
-        return array_merge($request->query->all(), $request->request->all(), $data);
+        return array_merge($request->request->all(), $data);
     }
 }

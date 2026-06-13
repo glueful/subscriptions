@@ -7,13 +7,15 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Container\Loader\DefaultServicesLoader;
+use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\DefaultEntitlementChecker;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
 use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
-use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
+use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
@@ -30,7 +32,7 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
  * Task 7.1 -- provider registrations: the two core-seam overrides (checker over
  * core's Null default, tier resolver over the framework default -- both rely on
  * the container-precedence last-wins fix), factories, middleware alias, commands,
- * and the class_exists-guarded payvia listener.
+ * and the class_exists-guarded payvia bridge.
  */
 final class ServiceProviderWiringTest extends SubscriptionsTestCase
 {
@@ -49,7 +51,7 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         self::assertTrue($tier['shared']);
     }
 
-    public function testServicesBindReposResolversServiceAndListener(): void
+    public function testServicesBindReposResolversServiceAndBridge(): void
     {
         $services = SubscriptionsServiceProvider::services();
 
@@ -64,12 +66,18 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
             RequirePlanManagementPermission::class,
             PlanController::class,
             EffectivePlanResolver::class,
-            PaymentProviderEventListener::class,
+            PayviaSubscriptionEventBridge::class,
             ] as $id
         ) {
             self::assertIsArray($services[$id] ?? null, "Missing service definition: {$id}");
             self::assertTrue($services[$id]['shared']);
         }
+
+        // The projector is bound behind its interface (shared, autowired).
+        $projector = $services[SubscriptionEventProjectorInterface::class] ?? null;
+        self::assertIsArray($projector);
+        self::assertSame(SubscriptionEventProjector::class, $projector['class']);
+        self::assertTrue($projector['shared']);
 
         foreach ([PlanCatalog::class, EntitlementResolver::class, SubscriptionService::class] as $id) {
             self::assertIsArray($services[$id] ?? null, "Missing factory service definition: {$id}");

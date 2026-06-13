@@ -10,7 +10,8 @@ final class PlanPayloadValidator
 {
     private const PLAN_KEY_PATTERN = '/\A[a-z0-9._-]{1,64}\z/';
     private const ENTITLEMENT_KEY_MAX_LENGTH = 128;
-    private const PAYVIA_PRICED_PLAN_UUID_LENGTH = 12;
+    private const DESCRIPTION_MAX_LENGTH = 255;
+    private const PROVIDER_PRICE_ID_MAX_LENGTH = 191;
 
     /**
      * @param array<string,mixed> $payload
@@ -27,10 +28,14 @@ final class PlanPayloadValidator
         return [
             'plan_key' => $this->validatePlanKey((string) $payload['plan_key']),
             'display_name' => $this->validateDisplayName($payload['display_name']),
-            'description' => $this->nullableString($payload['description'] ?? null, 'description'),
+            'description' => $this->nullableString(
+                $payload['description'] ?? null,
+                'description',
+                self::DESCRIPTION_MAX_LENGTH,
+            ),
             'entitlements' => $this->validateEntitlements($payload['entitlements']),
-            'payvia_priced_plan_uuid' => $this->validatePayviaPricedPlanUuid(
-                $payload['payvia_priced_plan_uuid'] ?? null,
+            'provider_price_id' => $this->validateProviderPriceId(
+                $payload['provider_price_id'] ?? null,
             ),
             'status' => $this->validateStatus($payload['status']),
             'sort_order' => $this->validateSortOrder($payload['sort_order'] ?? 0),
@@ -55,16 +60,20 @@ final class PlanPayloadValidator
         }
 
         if (array_key_exists('description', $payload)) {
-            $validated['description'] = $this->nullableString($payload['description'], 'description');
+            $validated['description'] = $this->nullableString(
+                $payload['description'],
+                'description',
+                self::DESCRIPTION_MAX_LENGTH,
+            );
         }
 
         if (array_key_exists('entitlements', $payload)) {
             $validated['entitlements'] = $this->validateEntitlements($payload['entitlements']);
         }
 
-        if (array_key_exists('payvia_priced_plan_uuid', $payload)) {
-            $validated['payvia_priced_plan_uuid'] = $this->validatePayviaPricedPlanUuid(
-                $payload['payvia_priced_plan_uuid'],
+        if (array_key_exists('provider_price_id', $payload)) {
+            $validated['provider_price_id'] = $this->validateProviderPriceId(
+                $payload['provider_price_id'],
             );
         }
 
@@ -88,16 +97,14 @@ final class PlanPayloadValidator
      */
     public function validateImportConfigPlan(string $planKey, array $configPlan, string $status): array
     {
-        $pricedPlan = $configPlan['payvia_priced_plan_uuid']
-            ?? $configPlan['payvia_priced_plan']
-            ?? null;
+        $providerPriceId = $configPlan['provider_price_id'] ?? null;
 
         return $this->validateCreate([
             'plan_key' => $planKey,
             'display_name' => $configPlan['display_name'] ?? $configPlan['name'] ?? $planKey,
             'description' => $configPlan['description'] ?? null,
             'entitlements' => $configPlan['entitlements'] ?? [],
-            'payvia_priced_plan_uuid' => $pricedPlan,
+            'provider_price_id' => $providerPriceId,
             'status' => $status,
             'sort_order' => $configPlan['sort_order'] ?? 0,
         ]);
@@ -130,7 +137,7 @@ final class PlanPayloadValidator
         return $displayName;
     }
 
-    private function nullableString(mixed $value, string $field): ?string
+    private function nullableString(mixed $value, string $field, ?int $maxLength = null): ?string
     {
         if ($value === null || $value === '') {
             return null;
@@ -140,7 +147,12 @@ final class PlanPayloadValidator
             throw new InvalidArgumentException("{$field} must be a string or null.");
         }
 
-        return (string) $value;
+        $string = (string) $value;
+        if ($maxLength !== null && strlen($string) > $maxLength) {
+            throw new InvalidArgumentException("{$field} must be {$maxLength} characters or fewer.");
+        }
+
+        return $string;
     }
 
     /** @return array<string,bool|int|null> */
@@ -176,18 +188,9 @@ final class PlanPayloadValidator
         return $entitlements;
     }
 
-    private function validatePayviaPricedPlanUuid(mixed $value): ?string
+    private function validateProviderPriceId(mixed $value): ?string
     {
-        $uuid = $this->nullableString($value, 'payvia_priced_plan_uuid');
-        if ($uuid === null) {
-            return null;
-        }
-
-        if (strlen($uuid) !== self::PAYVIA_PRICED_PLAN_UUID_LENGTH) {
-            throw new InvalidArgumentException('payvia_priced_plan_uuid must be 12 characters.');
-        }
-
-        return $uuid;
+        return $this->nullableString($value, 'provider_price_id', self::PROVIDER_PRICE_ID_MAX_LENGTH);
     }
 
     private function validateStatus(mixed $value): string

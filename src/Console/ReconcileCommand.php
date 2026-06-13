@@ -16,9 +16,9 @@ use Symfony\Component\Console\Output\OutputInterface;
  * `subscriptions:reconcile [--tenant=]` -- pull authoritative provider state (S8).
  *
  * With --tenant, reconciles that one tenant; without, iterates every subscription
- * that carries a payvia_subscription_id. With no payvia installed each reconcile
- * is a safe no-op (soft dep). The S10 scheduler hook is opt-in: wire this command
- * into your scheduler when subscriptions.reconcile.schedule_enabled is true.
+ * that carries a provider_subscription_id. With no provider installed each
+ * reconcile is a safe no-op (soft dep). The S10 scheduler hook is opt-in: wire this
+ * command into your scheduler when subscriptions.reconcile.schedule_enabled is true.
  */
 #[AsCommand(
     name: 'subscriptions:reconcile',
@@ -55,12 +55,12 @@ final class ReconcileCommand extends BaseCommand
         }
 
         $count = 0;
-        foreach ((new SubscriptionRepository())->allWithPayvia($ctx) as $subscription) {
+        foreach ((new SubscriptionRepository())->allWithProvider($ctx) as $subscription) {
             $service->reconcile((string) $subscription['tenant_uuid']);
             $count++;
         }
 
-        $this->info("Reconciled {$count} payvia-linked subscription(s).");
+        $this->info("Reconciled {$count} provider-linked subscription(s).");
         return self::SUCCESS;
     }
 }

@@ -6,13 +6,14 @@ namespace Glueful\Extensions\Subscriptions;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Helpers\Utils;
 
 /**
- * Tenant subscription lifecycle -- works fully with NO payvia installed
- * (free/trial/comp subscriptions never touch a payment object).
+ * Tenant subscription lifecycle -- works fully with NO payment provider
+ * installed (free/trial/comp subscriptions never touch a payment object).
  *
  * Holds the ApplicationContext from construction, so methods take no $ctx.
  */
@@ -20,19 +21,13 @@ final class SubscriptionService
 {
     private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
 
-    /** Injectable payvia seam: fn(string $gateway, string $gwSubId): ?array. */
-    private readonly ?\Closure $providerStatePuller;
-
     public function __construct(
         private readonly SubscriptionRepository $subscriptions,
         private readonly SubscriptionEventRepository $events,
         private readonly PlanCatalog $catalog,
         private readonly ApplicationContext $context,
-        ?callable $providerStatePuller = null,
+        private readonly ?ProviderStatePullerInterface $puller = null,
     ) {
-        $this->providerStatePuller = $providerStatePuller === null
-            ? null
-            : \Closure::fromCallable($providerStatePuller);
     }
 
     /** @return array<string,mixed>|null */
@@ -42,7 +37,7 @@ final class SubscriptionService
     }
 
     /**
-     * @param array<string,mixed> $opts status, trial_ends_at, current_period_end, payvia_* keys, metadata
+     * @param array<string,mixed> $opts status, trial_ends_at, current_period_end, provider_* keys, metadata
      * @return array<string,mixed>
      */
     public function start(string $tenantUuid, string $planKey, array $opts = []): array
@@ -58,11 +53,11 @@ final class SubscriptionService
             'status' => $status,
             'trial_ends_at' => $opts['trial_ends_at'] ?? null,
             'current_period_end' => $opts['current_period_end'] ?? null,
-            'payvia_gateway' => $opts['payvia_gateway'] ?? null,
-            'payvia_customer_id' => $opts['payvia_customer_id'] ?? null,
-            'payvia_subscription_id' => $opts['payvia_subscription_id'] ?? null,
-            'payvia_priced_plan_uuid' => $opts['payvia_priced_plan_uuid']
-                ?? $this->catalog->pricedPlanUuid($planKey),
+            'provider_gateway' => $opts['provider_gateway'] ?? null,
+            'provider_customer_id' => $opts['provider_customer_id'] ?? null,
+            'provider_subscription_id' => $opts['provider_subscription_id'] ?? null,
+            'provider_price_id' => $opts['provider_price_id']
+                ?? $this->catalog->providerPriceId($planKey),
             'metadata' => $opts['metadata'] ?? null,
         ];
 
@@ -90,7 +85,7 @@ final class SubscriptionService
 
         $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
             'plan_key' => $planKey,
-            'payvia_priced_plan_uuid' => $this->catalog->pricedPlanUuid($planKey),
+            'provider_price_id' => $this->catalog->providerPriceId($planKey),
         ]);
 
         $this->events->append($this->context, [
@@ -143,8 +138,8 @@ final class SubscriptionService
     /**
      * Pull authoritative provider state and re-derive local status (S8).
      *
-     * Payvia is a SOFT dependency: with no puller injected and payvia absent,
-     * this is a safe no-op returning the current row. Drift (status/period)
+     * The provider is a SOFT dependency: with no puller injected this is a
+     * safe no-op returning the current row. Drift (status/period)
      * is applied via updateByTenant and recorded as a `reconciled` event
      * (source `reconcile`, NULL logical key -- multiple NULLs are allowed).
      *
@@ -157,15 +152,15 @@ final class SubscriptionService
             return null;
         }
 
-        $gateway = (string) ($current['payvia_gateway'] ?? '');
-        $gwSubId = (string) ($current['payvia_subscription_id'] ?? '');
+        $gateway = (string) ($current['provider_gateway'] ?? '');
+        $gwSubId = (string) ($current['provider_subscription_id'] ?? '');
         if ($gwSubId === '') {
             return $current; // free/comp -- nothing to pull
         }
 
         $state = $this->pullProviderState($gateway, $gwSubId);
         if ($state === null) {
-            return $current; // payvia absent or provider unreachable -> no-op
+            return $current; // no puller, or provider unreachable -> no-op
         }
 
         $changes = $this->driftChanges($current, $state);
@@ -184,8 +179,8 @@ final class SubscriptionService
             'from_status' => $fromStatus,
             'to_status' => $toStatus,
             'source' => 'reconcile',
-            'payvia_gateway' => $gateway !== '' ? $gateway : null,
-            'payvia_logical_event_key' => null,
+            'provider_gateway' => $gateway !== '' ? $gateway : null,
+            'provider_logical_event_key' => null,
             'data' => $state,
         ]);
 
@@ -193,31 +188,14 @@ final class SubscriptionService
     }
 
     /**
-     * Resolve authoritative provider state. The injected puller wins (tests,
-     * custom wiring); otherwise the real payvia reconcile service is used only
-     * when its class exists (soft dep -- never required at compile time).
+     * Resolve authoritative provider state through the injected puller seam.
+     * Absent a puller (no provider installed), this is a safe null no-op.
      *
      * @return array<string,mixed>|null
      */
-    private function pullProviderState(string $gateway, string $gwSubId): ?array
+    private function pullProviderState(string $gateway, string $providerSubscriptionId): ?array
     {
-        if ($this->providerStatePuller !== null) {
-            $state = ($this->providerStatePuller)($gateway, $gwSubId);
-
-            return is_array($state) ? $state : null;
-        }
-
-        if (!class_exists(\Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class)) {
-            return null;
-        }
-
-        try {
-            $service = app($this->context, \Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class);
-
-            return $service->reconcile($gateway, $gwSubId);
-        } catch (\Throwable) {
-            return null; // provider/service failure degrades to "no drift applied"
-        }
+        return $this->puller?->pull($gateway, $providerSubscriptionId);
     }
 
     /**
@@ -240,7 +218,7 @@ final class SubscriptionService
             }
             if ($status === 'past_due') {
                 // Entering past_due grants the SAME dunning grace as the webhook
-                // path (PaymentProviderEventListener). Already-past_due rows never
+                // path (SubscriptionEventProjector). Already-past_due rows never
                 // reach this branch (status unchanged), so grace is never re-extended.
                 $changes['grace_ends_at'] = $this->formatForDb(
                     new \DateTimeImmutable(sprintf('+%d days', $this->catalog->graceDays()))

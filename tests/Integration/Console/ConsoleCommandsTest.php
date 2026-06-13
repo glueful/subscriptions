@@ -196,14 +196,14 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         self::assertSame(Command::FAILURE, $exit);
     }
 
-    public function testReconcileAllIteratesPayviaLinkedSubscriptions(): void
+    public function testReconcileAllIteratesProviderLinkedSubscriptions(): void
     {
         $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'free']);
         $this->seedSubscription([
             'tenant_uuid' => 'tenantB',
             'plan_key' => 'pro',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $command = new ReconcileCommand();
@@ -213,7 +213,7 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         $exit = $tester->execute([]);
 
         self::assertSame(Command::SUCCESS, $exit);
-        // Only the payvia-linked subscription is iterated.
+        // Only the provider-linked subscription is iterated.
         self::assertStringContainsString('1', $tester->getDisplay());
     }
 
@@ -225,7 +225,7 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
             'display_name' => ucfirst($planKey),
             'description' => null,
             'entitlements' => json_encode(['projects.limit' => 25], JSON_THROW_ON_ERROR),
-            'payvia_priced_plan_uuid' => null,
+            'provider_price_id' => null,
             'status' => $status,
             'sort_order' => 10,
             'created_at' => '2026-06-10 10:00:00',

@@ -22,7 +22,7 @@ final class CreateSubscriptionPlansTable implements MigrationInterface
             $table->string('display_name', 120);
             $table->string('description', 255)->nullable();
             $table->json('entitlements');
-            $table->string('payvia_priced_plan_uuid', 12)->nullable();
+            $table->string('provider_price_id', 191)->nullable();
             $table->string('status', 20);
             $table->integer('sort_order')->default(0);
             $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');

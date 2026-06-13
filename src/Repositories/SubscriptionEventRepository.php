@@ -41,8 +41,8 @@ class SubscriptionEventRepository
     public function existsByLogicalKey(ApplicationContext $context, string $gateway, string $key): bool
     {
         return db($context)->table('subscription_events')
-            ->where('payvia_gateway', '=', $gateway)
-            ->where('payvia_logical_event_key', '=', $key)
+            ->where('provider_gateway', '=', $gateway)
+            ->where('provider_logical_event_key', '=', $key)
             ->limit(1)
             ->first() !== null;
     }

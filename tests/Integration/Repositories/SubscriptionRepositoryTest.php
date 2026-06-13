@@ -24,25 +24,25 @@ final class SubscriptionRepositoryTest extends SubscriptionsTestCase
         self::assertNull($repo->findByTenant($this->appContext(), 'ghost'));
     }
 
-    public function testFindByPayviaSubscriptionIsGatewayScoped(): void
+    public function testFindByProviderSubscriptionIsGatewayScoped(): void
     {
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
-            'payvia_gateway' => 'stripe',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'stripe',
+            'provider_subscription_id' => 'sub_X',
         ]);
         $this->seedSubscription([
             'tenant_uuid' => 'tenantB',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
         $repo = new SubscriptionRepository();
 
-        $row = $repo->findByPayviaSubscription($this->appContext(), 'paystack', 'sub_X');
+        $row = $repo->findByProviderSubscription($this->appContext(), 'paystack', 'sub_X');
         self::assertIsArray($row);
         self::assertSame('tenantB', $row['tenant_uuid']);
 
-        self::assertNull($repo->findByPayviaSubscription($this->appContext(), 'flutterwave', 'sub_X'));
+        self::assertNull($repo->findByProviderSubscription($this->appContext(), 'flutterwave', 'sub_X'));
     }
 
     public function testActiveOverridesExcludeExpired(): void

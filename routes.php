@@ -34,7 +34,7 @@ $router->group(['prefix' => '/subscriptions/plans', 'middleware' => ['auth', 'su
      *   display_name:string="Display name" {required=display_name}
      *   description:string="Optional description"
      *   entitlements:object="Entitlement map: bool|int>=0|null values" {required=entitlements}
-     *   payvia_priced_plan_uuid:string="Optional Payvia priced-plan UUID"
+     *   provider_price_id:string="Optional provider price/plan identifier"
      *   status:string="Plan status: draft|active|archived" {required=status}
      *   sort_order:int="Admin/UI ordering value"
      * @response 201 application/json "Plan created"
@@ -87,7 +87,7 @@ $router->group(['prefix' => '/subscriptions/plans', 'middleware' => ['auth', 'su
      *   display_name:string="New display name"
      *   description:string="New description or null"
      *   entitlements:object="Replacement entitlement map: bool|int>=0|null values"
-     *   payvia_priced_plan_uuid:string="New Payvia priced-plan UUID or null"
+     *   provider_price_id:string="Optional provider price/plan identifier"
      *   status:string="New status: draft|active|archived"
      *   sort_order:int="New admin/UI ordering value"
      * @response 200 application/json "Plan updated"

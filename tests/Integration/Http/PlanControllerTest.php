@@ -68,6 +68,28 @@ final class PlanControllerTest extends SubscriptionsTestCase
         self::assertSame('team', $data['data']['plan']['plan_key']);
     }
 
+    public function testStoreIgnoresQueryStringAndUsesBodyValues(): void
+    {
+        $request = Request::create(
+            '/subscriptions/plans?status=draft&entitlements[hijacked]=1',
+            'POST',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json'],
+            json_encode($this->payload('team'), JSON_THROW_ON_ERROR)
+        );
+
+        $response = $this->controller->store($request);
+        $data = $this->json($response);
+
+        self::assertSame(201, $response->getStatusCode());
+        // Body status ('active') wins; query-string status ('draft') is ignored.
+        self::assertSame('active', $data['data']['plan']['status']);
+        // Query-string entitlements are not merged into the body.
+        self::assertArrayNotHasKey('hijacked', $data['data']['plan']['entitlements']);
+    }
+
     public function testPatchRejectsActiveToDraft(): void
     {
         $this->plans->create($this->payload('team'));

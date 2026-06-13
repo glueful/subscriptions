@@ -2,28 +2,26 @@
 
 declare(strict_types=1);
 
-namespace Glueful\Extensions\Subscriptions\Listeners;
+namespace Glueful\Extensions\Subscriptions\Projection;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Psr\Log\LoggerInterface;
 
 /**
- * Projects payvia PaymentProviderEvents onto tenant subscription state (S6/S7).
- *
- * Payvia is a SOFT dependency: this class imports NO payvia types. The event is
- * read duck-typed (`$payviaEvent->event` with gateway()/type()/logicalEventKey()/
- * normalized() -- shape verified against payvia's PaymentProviderEventInterface),
- * and registration happens in the provider only when payvia's event class exists.
+ * Owns all provider-event projection rules: claim-first idempotency, tenant
+ * relink (unlinked-only), the status state machine, period/grace handling.
+ * Provider-agnostic -- consumes a ProviderSubscriptionEvent DTO.
  *
  * Concurrency-safe idempotency is claim-first: the subscription_events insert
- * (unique on (payvia_gateway, payvia_logical_event_key)) and the projection run
+ * (unique on (provider_gateway, provider_logical_event_key)) and the projection run
  * in ONE transaction, so a duplicate/concurrent delivery that loses the claim
  * rolls back and never re-projects (e.g. grace is never extended twice).
  */
-final class PaymentProviderEventListener
+final class SubscriptionEventProjector implements SubscriptionEventProjectorInterface
 {
     private const SETTLEABLE = ['trialing', 'past_due'];
     private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
@@ -36,18 +34,12 @@ final class PaymentProviderEventListener
     ) {
     }
 
-    public function __invoke(object $payviaEvent): void
+    public function project(ProviderSubscriptionEvent $event): void
     {
-        $inner = $payviaEvent->event ?? null;
-        if (!is_object($inner)) {
-            return;
-        }
-
-        $gateway = (string) $inner->gateway();
-        $type = (string) $inner->type();
-        $logicalKey = (string) $inner->logicalEventKey();
-        /** @var array<string,mixed> $normalized */
-        $normalized = (array) $inner->normalized();
+        $gateway = $event->gateway;
+        $type = $event->type;
+        $logicalKey = $event->logicalEventKey;
+        $normalized = $event->normalized;
 
         // Cheap read-side early-out ONLY -- the transactional claim below is the gate.
         if (
@@ -63,10 +55,9 @@ final class PaymentProviderEventListener
             return; // unmapped provider subscription -> graceful no-op
         }
 
-        $changes = $this->computeChanges($type, $sub, $normalized);
-        if ($changes === null) {
-            return; // event type this projection does not handle
-        }
+        // Behavior change vs. the old listener: an unknown-but-MAPPED type is
+        // still claimed/recorded (empty change set) instead of returning early.
+        $changes = $this->computeChanges($type, $sub, $normalized) ?? [];
 
         $from = isset($sub['status']) ? (string) $sub['status'] : null;
         $to = isset($changes['status']) ? (string) $changes['status'] : $from;
@@ -74,15 +65,15 @@ final class PaymentProviderEventListener
         try {
             db($this->context)->transaction(
                 function () use ($sub, $changes, $gateway, $logicalKey, $from, $to, $type, $normalized): void {
-                    // (1) CLAIM -- throws on (payvia_gateway, payvia_logical_event_key) duplicate.
+                    // (1) CLAIM -- throws on (provider_gateway, provider_logical_event_key) duplicate.
                     $this->events->insertOrThrow($this->context, [
                         'tenant_uuid' => (string) $sub['tenant_uuid'],
                         'type' => $type,
                         'from_status' => $from,
                         'to_status' => $to,
-                        'source' => 'payvia_event',
-                        'payvia_gateway' => $gateway !== '' ? $gateway : null,
-                        'payvia_logical_event_key' => $logicalKey !== '' ? $logicalKey : null,
+                        'source' => 'provider_event',
+                        'provider_gateway' => $gateway !== '' ? $gateway : null,
+                        'provider_logical_event_key' => $logicalKey !== '' ? $logicalKey : null,
                         'data' => $normalized,
                     ]);
 
@@ -98,8 +89,8 @@ final class PaymentProviderEventListener
                 // error would otherwise vanish silently. Debug-level by design.
                 $this->resolveLogger()?->debug('Duplicate provider event claim skipped', [
                     'event' => 'subscriptions.duplicate_claim_skipped',
-                    'payvia_gateway' => $gateway,
-                    'payvia_logical_event_key' => $logicalKey,
+                    'provider_gateway' => $gateway,
+                    'provider_logical_event_key' => $logicalKey,
                     'type' => $type,
                     'error' => $e->getMessage(),
                 ]);
@@ -111,7 +102,7 @@ final class PaymentProviderEventListener
     }
 
     /**
-     * Resolved DEFENSIVELY: the listener must never hard-depend on a logging
+     * Resolved DEFENSIVELY: the projector must never hard-depend on a logging
      * service -- a missing binding would turn a debug line into a fatal.
      */
     private function resolveLogger(): ?LoggerInterface
@@ -135,8 +126,17 @@ final class PaymentProviderEventListener
 
     /**
      * Map provider (gateway, gateway_subscription_id) -> tenant subscription row.
-     * On subscription.created an unlinked row can be recovered via the provider
-     * metadata's tenant_uuid -- writing BOTH payvia_gateway and payvia_subscription_id.
+     * On subscription.created an UNLINKED row can be recovered via the provider
+     * metadata's tenant_uuid -- writing BOTH provider_gateway and provider_subscription_id.
+     *
+     * SECURITY: `metadata.tenant_uuid` flows verbatim from the provider webhook
+     * payload (the provider passes metadata through unmodified), so it is NOT a
+     * trust anchor. It is used here only as a RECOVERY HINT to attach an
+     * as-yet-unlinked subscription to its tenant -- never to MOVE an existing link
+     * from one provider subscription to another. A row that is already linked is
+     * left untouched (a mismatch is logged as an anomaly and no-ops). The real
+     * trust anchor would be a server-issued correlation token round-tripped through
+     * the provider, which is an app-side concern and out of scope here.
      *
      * @param array<string,mixed> $normalized
      * @return array<string,mixed>|null
@@ -147,7 +147,7 @@ final class PaymentProviderEventListener
         $gwSubId = is_scalar($gwSubId) && (string) $gwSubId !== '' ? (string) $gwSubId : null;
 
         $sub = ($gateway !== '' && $gwSubId !== null)
-            ? $this->subscriptions->findByPayviaSubscription($this->context, $gateway, $gwSubId)
+            ? $this->subscriptions->findByProviderSubscription($this->context, $gateway, $gwSubId)
             : null;
 
         if ($sub !== null || $type !== 'subscription.created' || $gateway === '' || $gwSubId === null) {
@@ -167,16 +167,49 @@ final class PaymentProviderEventListener
             return null;
         }
 
+        // Only attach when the target row is NOT already linked. We must never
+        // overwrite an existing provider link based on provider-echoed metadata.
+        $existingSubId = $existing['provider_subscription_id'] ?? null;
+        $existingSubId = is_scalar($existingSubId) ? (string) $existingSubId : '';
+
+        if ($existingSubId !== '') {
+            $existingGateway = is_scalar($existing['provider_gateway'] ?? null)
+                ? (string) $existing['provider_gateway']
+                : '';
+
+            // Already linked to THIS exact (gateway, sub id): a no-op relink --
+            // return the row so projection proceeds normally. (Defensive: the
+            // findByProviderSubscription lookup above would already have matched it.)
+            if ($existingGateway === $gateway && $existingSubId === $gwSubId) {
+                return $existing;
+            }
+
+            // Already linked to a DIFFERENT provider subscription: refuse to move
+            // the link. Log the anomaly (no payload) and no-op gracefully.
+            $this->resolveLogger()?->warning('Provider relink conflict skipped', [
+                'event' => 'subscriptions.relink_conflict_skipped',
+                'tenant_uuid' => $tenantUuid,
+                'existing_gateway' => $existingGateway,
+                'existing_subscription_id' => $existingSubId,
+                'incoming_gateway' => $gateway,
+                'incoming_subscription_id' => $gwSubId,
+            ]);
+
+            return null;
+        }
+
         $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
-            'payvia_gateway' => $gateway,
-            'payvia_subscription_id' => $gwSubId,
+            'provider_gateway' => $gateway,
+            'provider_subscription_id' => $gwSubId,
         ]);
 
         return $this->subscriptions->findByTenant($this->context, $tenantUuid);
     }
 
     /**
-     * The spec's projection mapping. Null means "type not handled here".
+     * The spec's projection mapping. Null means "type not handled here"; the
+     * caller intentionally coalesces null and [] to the same outcome (claim the
+     * event, project no state change), so the distinction is informational only.
      *
      * @param array<string,mixed> $sub
      * @param array<string,mixed> $normalized
@@ -188,6 +221,13 @@ final class PaymentProviderEventListener
 
         switch ($type) {
             case 'subscription.created':
+                // A late or replayed subscription.created (distinct logical key, so
+                // idempotency does not suppress it) must never resurrect a terminal
+                // canceled subscription. Record/claim the event but project nothing.
+                if ($currentStatus === 'canceled') {
+                    return [];
+                }
+
                 $changes = [
                     'status' => $this->normalizedStatus($normalized) === 'trialing' ? 'trialing' : 'active',
                 ];

@@ -27,7 +27,7 @@ final class SubscriptionPlanRepositoryTest extends SubscriptionsTestCase
             'display_name' => 'Pro',
             'description' => 'Professional plan',
             'entitlements' => ['projects.limit' => 10, 'reports.export' => true],
-            'payvia_priced_plan_uuid' => null,
+            'provider_price_id' => null,
             'status' => 'active',
             'sort_order' => 10,
             'created_at' => '2026-06-10 10:00:00',

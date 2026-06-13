@@ -123,4 +123,43 @@ final class DefaultEntitlementCheckerTest extends SubscriptionsTestCase
         self::assertFalse($this->checker->allows('lapsedT', 'reports.export'));
         self::assertSame(3, $this->checker->limit('lapsedT', 'projects.limit'));
     }
+
+    /**
+     * Override values are JSON-decoded and unvalidated, so a malformed value can
+     * reach the checker as an unrecognized type. These must fail closed: the JSON
+     * string "false" must not (bool)-coerce to a grant, and an array/object must
+     * not read as unlimited.
+     *
+     * @return array<string,array{mixed}>
+     */
+    public static function unrecognizedTypeProvider(): array
+    {
+        return [
+            'string false' => ['false'],
+            'string true' => ['true'],
+            'string word' => ['nope'],
+            'array' => [[1, 2, 3]],
+            'object' => [['nested' => 'value']],
+        ];
+    }
+
+    /** @dataProvider unrecognizedTypeProvider */
+    public function testUnrecognizedTypeDeniesAndZeroesLimit(mixed $value): void
+    {
+        $this->seedOverride('proT', 'projects.limit', $value);
+
+        self::assertFalse($this->checker->allows('proT', 'projects.limit'));
+        self::assertSame(0, $this->checker->limit('proT', 'projects.limit'));
+    }
+
+    private function seedOverride(string $tenantUuid, string $entitlement, mixed $value): void
+    {
+        $this->connection()->table('subscription_overrides')->insert([
+            'uuid' => \Glueful\Helpers\Utils::generateNanoID(12),
+            'tenant_uuid' => $tenantUuid,
+            'entitlement' => $entitlement,
+            'value' => json_encode($value, JSON_THROW_ON_ERROR),
+            'expires_at' => null,
+        ]);
+    }
 }

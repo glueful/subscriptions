@@ -8,13 +8,17 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Cache\CacheStore;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\ServiceProvider;
+use Glueful\Extensions\Subscriptions\Bridge\PayviaProviderStatePuller;
+use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
+use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
 use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
-use Glueful\Extensions\Subscriptions\Listeners\PaymentProviderEventListener;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
+use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
 use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
@@ -54,7 +58,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
      */
     public static function services(): array
     {
-        return [
+        $defs = [
             \Glueful\Entitlements\Contracts\EntitlementCheckerInterface::class => [
                 'class' => DefaultEntitlementChecker::class,
                 'shared' => true,
@@ -111,8 +115,8 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeEntitlementResolver'],
                 'shared' => true,
             ],
-            // Explicit factory: the optional payvia puller seam stays at its
-            // default (the service itself resolves payvia via class_exists).
+            // Explicit factory: resolves the optional ProviderStatePuller seam
+            // (bound only when a provider is installed; null otherwise).
             SubscriptionService::class => [
                 'factory' => [self::class, 'makeSubscriptionService'],
                 'shared' => true,
@@ -134,13 +138,40 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'shared' => true,
                 'autowire' => true,
             ],
+            SubscriptionEventProjectorInterface::class => [
+                'class' => SubscriptionEventProjector::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
             // Registered as a service so the '@serviceId' lazy listener resolves.
-            PaymentProviderEventListener::class => [
-                'class' => PaymentProviderEventListener::class,
+            PayviaSubscriptionEventBridge::class => [
+                'class' => PayviaSubscriptionEventBridge::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            // Safe to register unconditionally: the puller depends only on
+            // ApplicationContext and names payvia solely via a runtime string
+            // FQCN inside pull(), so it autoloads/constructs even with payvia absent.
+            PayviaProviderStatePuller::class => [
+                'class' => PayviaProviderStatePuller::class,
                 'shared' => true,
                 'autowire' => true,
             ],
         ];
+
+        // Bind the reconcile puller to the payvia implementation ONLY when payvia
+        // is installed. Absent payvia, ProviderStatePullerInterface stays unbound
+        // and SubscriptionService resolves a null puller (reconcile no-ops). A
+        // third-party provider binds this interface to its own puller instead.
+        if (class_exists(\Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class)) {
+            $defs[ProviderStatePullerInterface::class] = [
+                'class' => PayviaProviderStatePuller::class,
+                'shared' => true,
+                'autowire' => true,
+            ];
+        }
+
+        return $defs;
     }
 
     public static function makePlanCatalog(ContainerInterface $c): PlanCatalog
@@ -166,11 +197,16 @@ final class SubscriptionsServiceProvider extends ServiceProvider
 
     public static function makeSubscriptionService(ContainerInterface $c): SubscriptionService
     {
+        $puller = $c->has(ProviderStatePullerInterface::class)
+            ? $c->get(ProviderStatePullerInterface::class)
+            : null;
+
         return new SubscriptionService(
             $c->get(SubscriptionRepository::class),
             $c->get(SubscriptionEventRepository::class),
             $c->get(PlanCatalog::class),
             $c->get(ApplicationContext::class),
+            $puller,
         );
     }
 
@@ -201,11 +237,19 @@ final class SubscriptionsServiceProvider extends ServiceProvider
     public function register(ApplicationContext $context): void
     {
         $this->mergeConfig('subscriptions', require __DIR__ . '/../config/subscriptions.php');
-        $this->loadMigrationsFrom(
-            __DIR__ . '/../migrations',
-            MigrationPriority::DEPENDENT,
-            'glueful/subscriptions'
-        );
+
+        try {
+            $this->loadMigrationsFrom(
+                __DIR__ . '/../migrations',
+                MigrationPriority::DEPENDENT,
+                'glueful/subscriptions'
+            );
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to register migrations: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
+        }
     }
 
     public function boot(ApplicationContext $context): void
@@ -221,17 +265,44 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             error_log('[Subscriptions] Failed to register extension metadata: ' . $e->getMessage());
         }
 
-        $this->discoverCommands('Glueful\\Extensions\\Subscriptions\\Console', __DIR__ . '/Console');
-        $this->loadRoutesFrom(__DIR__ . '/../routes.php');
+        try {
+            $this->discoverCommands('Glueful\\Extensions\\Subscriptions\\Console', __DIR__ . '/Console');
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to discover commands: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
+        }
+
+        try {
+            $this->loadRoutesFrom(__DIR__ . '/../routes.php');
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to load routes: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
+        }
 
         // S7: project payvia provider events onto subscription state -- but ONLY
         // when payvia is installed (soft dep). Lazy '@serviceId' listener so the
         // projection pipeline is constructed on first dispatch, not at boot.
-        if (class_exists(\Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class)) {
-            app($context, \Glueful\Events\EventService::class)->addListener(
-                \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,
-                '@' . PaymentProviderEventListener::class
-            );
+        try {
+            if (class_exists(\Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class)) {
+                app($context, \Glueful\Events\EventService::class)->addListener(
+                    \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,
+                    '@' . PayviaSubscriptionEventBridge::class
+                );
+            }
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to register payvia event bridge: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
         }
+    }
+
+    private function bootEnv(): string
+    {
+        return (string) ($_ENV['APP_ENV'] ?? (getenv('APP_ENV') !== false ? getenv('APP_ENV') : 'production'));
     }
 }

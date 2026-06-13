@@ -29,7 +29,7 @@ final class PlanPayloadValidatorTest extends TestCase
                 'reports.export' => true,
                 'support.priority' => null,
             ],
-            'payvia_priced_plan_uuid' => 'price1234567',
+            'provider_price_id' => 'price1234567',
             'status' => 'active',
             'sort_order' => 20,
         ];
@@ -65,12 +65,19 @@ final class PlanPayloadValidatorTest extends TestCase
         ]));
     }
 
-    public function testRejectsPayviaPricedPlanUuidThatIsNot12Characters(): void
+    public function testRejectsProviderPriceIdLongerThan191Characters(): void
     {
+        // The 12-char UUID rule was dropped: any string up to 191 chars is valid,
+        // longer is rejected. (An arbitrary mid-length id is accepted, see below.)
+        $validated = $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'provider_price_id' => 'price_stripe_1234567890',
+        ]));
+        self::assertSame('price_stripe_1234567890', $validated['provider_price_id']);
+
         $this->expectException(InvalidArgumentException::class);
 
         $this->validator->validateCreate(array_merge($this->validPayload(), [
-            'payvia_priced_plan_uuid' => 'too-long-price-id',
+            'provider_price_id' => str_repeat('a', 192),
         ]));
     }
 
@@ -186,16 +193,54 @@ final class PlanPayloadValidatorTest extends TestCase
         );
     }
 
+    public function testCreateAcceptsDescriptionOf255Characters(): void
+    {
+        $validated = $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'description' => str_repeat('a', 255),
+        ]));
+
+        self::assertSame(str_repeat('a', 255), $validated['description']);
+    }
+
+    public function testCreateRejectsDescriptionLongerThan255Characters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'description' => str_repeat('a', 256),
+        ]));
+    }
+
+    public function testPatchRejectsDescriptionLongerThan255Characters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validatePatch(
+            ['description' => str_repeat('a', 256)],
+            $this->validPayload()
+        );
+    }
+
+    public function testPatchAcceptsDescriptionOf255Characters(): void
+    {
+        $validated = $this->validator->validatePatch(
+            ['description' => str_repeat('a', 255)],
+            $this->validPayload()
+        );
+
+        self::assertSame(str_repeat('a', 255), $validated['description']);
+    }
+
     public function testCreateNormalizesDefaults(): void
     {
         $payload = $this->validPayload();
-        unset($payload['description'], $payload['payvia_priced_plan_uuid'], $payload['sort_order']);
+        unset($payload['description'], $payload['provider_price_id'], $payload['sort_order']);
         $payload['status'] = 'DRAFT';
 
         $validated = $this->validator->validateCreate($payload);
 
         self::assertNull($validated['description']);
-        self::assertNull($validated['payvia_priced_plan_uuid']);
+        self::assertNull($validated['provider_price_id']);
         self::assertSame(0, $validated['sort_order']);
         self::assertSame('draft', $validated['status']);
     }
@@ -205,13 +250,13 @@ final class PlanPayloadValidatorTest extends TestCase
         $validated = $this->validator->validateImportConfigPlan('starter', [
             'name' => 'Starter',
             'entitlements' => ['projects.limit' => 3],
-            'payvia_priced_plan_uuid' => 'price1234567',
+            'provider_price_id' => 'price1234567',
         ], 'active');
 
         self::assertSame('starter', $validated['plan_key']);
         self::assertSame('Starter', $validated['display_name']);
         self::assertSame(['projects.limit' => 3], $validated['entitlements']);
-        self::assertSame('price1234567', $validated['payvia_priced_plan_uuid']);
+        self::assertSame('price1234567', $validated['provider_price_id']);
         self::assertSame('active', $validated['status']);
     }
 }

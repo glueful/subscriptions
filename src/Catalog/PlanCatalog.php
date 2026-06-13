@@ -70,17 +70,15 @@ final class PlanCatalog
         return max(0, (int) ($this->config['grace_days'] ?? 0));
     }
 
-    public function pricedPlanUuid(string $planKey): ?string
+    public function providerPriceId(string $planKey): ?string
     {
         $row = $this->resolvableDbPlan($planKey);
         if ($row !== null) {
-            $value = $row['payvia_priced_plan_uuid'] ?? null;
+            $value = $row['provider_price_id'] ?? null;
             return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
         }
 
-        $value = $this->config['plans'][$planKey]['payvia_priced_plan_uuid']
-            ?? $this->config['plans'][$planKey]['payvia_priced_plan']
-            ?? null;
+        $value = $this->config['plans'][$planKey]['provider_price_id'] ?? null;
 
         return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
     }

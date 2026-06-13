@@ -33,7 +33,7 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
             'display_name' => ucfirst($planKey),
             'description' => 'Managed plan',
             'entitlements' => ['projects.limit' => 10],
-            'payvia_priced_plan_uuid' => 'price1234567',
+            'provider_price_id' => 'price1234567',
             'status' => 'active',
             'sort_order' => 10,
         ];
@@ -60,7 +60,7 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         $this->service->create($this->payload('team'));
     }
 
-    public function testPatchUpdatesFieldsStatusPayviaSortOrderAndEntitlements(): void
+    public function testPatchUpdatesFieldsStatusProviderSortOrderAndEntitlements(): void
     {
         $this->service->create(array_merge($this->payload('team'), ['status' => 'draft']));
 
@@ -68,7 +68,7 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
             'display_name' => 'Team Plus',
             'description' => 'Updated',
             'entitlements' => ['projects.limit' => 50, 'reports.export' => true],
-            'payvia_priced_plan_uuid' => 'price7654321',
+            'provider_price_id' => 'price7654321',
             'status' => 'active',
             'sort_order' => 30,
         ]);
@@ -76,7 +76,7 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         self::assertSame('Team Plus', $row['display_name']);
         self::assertSame('Updated', $row['description']);
         self::assertSame(['projects.limit' => 50, 'reports.export' => true], $row['entitlements']);
-        self::assertSame('price7654321', $row['payvia_priced_plan_uuid']);
+        self::assertSame('price7654321', $row['provider_price_id']);
         self::assertSame('active', $row['status']);
         self::assertSame(30, (int) $row['sort_order']);
     }
@@ -129,19 +129,19 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         self::assertSame(['projects.limit' => 999], $this->service->find('pro')['entitlements']);
     }
 
-    public function testForceImportOverwritesEntitlementsAndPayviaLink(): void
+    public function testForceImportOverwritesEntitlementsAndProviderLink(): void
     {
-        $this->setConfig('subscriptions.plans.pro.payvia_priced_plan', 'configPrice1');
+        $this->setConfig('subscriptions.plans.pro.provider_price_id', 'configPrice1');
         $this->service->create(array_merge($this->payload('pro'), [
             'entitlements' => ['projects.limit' => 999],
-            'payvia_priced_plan_uuid' => 'oldPrice0001',
+            'provider_price_id' => 'oldPrice0001',
         ]));
 
         $this->service->importConfig(force: true);
         $row = $this->service->find('pro');
 
         self::assertSame(50, $row['entitlements']['projects.limit']);
-        self::assertSame('configPrice1', $row['payvia_priced_plan_uuid']);
+        self::assertSame('configPrice1', $row['provider_price_id']);
     }
 
     public function testPatchAuditCapturesBeforeAfterAndDiff(): void

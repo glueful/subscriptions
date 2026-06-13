@@ -4,6 +4,92 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## Unreleased
 
+## 1.2.0 -- 2026-06-13
+
+### Added
+
+- Provider-agnostic subscription event projection. A new
+  `SubscriptionEventProjectorInterface` + `ProviderSubscriptionEvent` DTO own all
+  projection rules (claim-first idempotency, tenant relink, the status state
+  machine, period/grace), and a `ProviderStatePullerInterface` drives reconcile.
+  Third-party payment providers can now project subscription state and reconcile
+  drift by mapping their events into the DTO and (optionally) binding their own
+  puller -- with no payvia present and no subscriptions internals touched. See
+  `docs/BRING_YOUR_OWN_PROVIDER.md`.
+
+### Fixed
+
+- Harden boot/registration against partial failures. Each independent
+  registration step (migrations, command discovery, route loading, and the
+  optional payvia event listener) is now wrapped in its own try/catch that logs
+  a `[Subscriptions] ...` message and re-throws outside production -- so a single
+  failing step degrades gracefully in production instead of aborting app boot,
+  while still failing fast during development. The existing `registerMeta` guard
+  is unchanged.
+- Cap plan `description` at 255 characters in the payload validator (matching the
+  `subscription_plans.description` `VARCHAR(255)` column) on both the create and
+  patch paths. An over-long description now raises a clean validation error (HTTP
+  422) instead of a confusing 500 (strict MySQL) or silent truncation. Only
+  `description` is capped; other `nullableString` fields are unaffected.
+- Fail closed when an entitlement value has an unrecognized type. Plan values are
+  validated (`bool` | `int >= 0` | `null`) but override values are JSON-decoded
+  and unvalidated, so a malformed value could reach the checker. `allows()` now
+  denies (and `limit()` returns `0`) for any non-bool/non-numeric/non-null type --
+  previously the JSON string `"false"` `(bool)`-coerced to a grant and an
+  unrecognized type read as an unlimited (`null`) limit. The intentional
+  `null = unlimited/allow` semantics are unchanged.
+- Derive the entitlement cache key from the resolved content rather than from
+  `updated_at` timestamps. The key now folds in a stable hash of the
+  resolved-plan inputs (`status`, `plan_key`, `grace_ends_at`) and of the active
+  override map, so a status/plan downgrade or an override edit invalidates the
+  cache immediately even when a writer fails to bump `updated_at` -- closing a
+  window (up to the cache TTL) in which a downgraded tenant kept elevated
+  entitlements. The active override map is now read once and reused for both the
+  key and the merge (no extra query).
+- Only relink unlinked tenant subscriptions on provider `subscription.created`
+  events. The provider-echoed `metadata.tenant_uuid` is now treated as a recovery
+  HINT used solely to attach an as-yet-unlinked subscription -- never to move an
+  existing link. A `subscription.created` naming a tenant whose row is already
+  linked to a different provider subscription is logged as an anomaly
+  (`subscriptions.relink_conflict_skipped`, no payload) and no-ops instead of
+  silently stealing the link.
+- Do not resurrect a canceled subscription on a late or replayed
+  `subscription.created` event. When the stored status is already `canceled`, the
+  event is still recorded/claimed but no status change is projected, so a
+  delayed creation event can no longer flip a terminal subscription back to
+  active.
+
+### Changed
+
+- Read plan write payloads (`store`/`update`) from the JSON body and POST form
+  only -- query-string params are no longer merged into the body. Validation
+  already gated every field, so this is a logging-hygiene change: plan fields
+  (e.g. `entitlements`/`status`) passed via the query string for a write are no
+  longer copied into the request body (and thus access logs). `importConfig`
+  reads its `force`/`status` query params explicitly and is unaffected. Callers
+  that relied on passing plan write fields via the query string must move them
+  into the request body.
+- Payvia is now a thin optional integration rather than the projection owner. The
+  former `PaymentProviderEventListener` (which both adapted payvia's event shape
+  AND owned the projection rules) is replaced by a generic
+  `SubscriptionEventProjector` plus a thin `PayviaSubscriptionEventBridge`
+  (event adapter) and `PayviaProviderStatePuller` (reconcile adapter), each
+  registered only when payvia is installed. All subscriptions-owned `payvia_*`
+  storage/options/config/CLI vocabulary is renamed to `provider_*`:
+  `provider_gateway`, `provider_customer_id`, `provider_subscription_id`,
+  `provider_price_id` (generalized from the 12-char `payvia_priced_plan_uuid` to
+  a `VARCHAR(191)` provider price/plan identifier), and
+  `provider_logical_event_key`; the event `source` value `payvia_event` becomes
+  `provider_event`, the unique index `uniq_subscriptions_payvia_sub` becomes
+  `uniq_subscriptions_provider_sub`, and the plan CLI flag `--payvia-priced-plan`
+  becomes `--provider-price-id`. No backward-compat shim or dual-read (the
+  extension is pre-release); the columns are renamed directly in the base
+  migrations.
+- An unknown provider event type that maps to an existing subscription is now
+  recorded (the idempotency claim is taken) with no projected status change,
+  instead of being dropped before the claim. This keeps every delivered event
+  auditable and idempotent even when its type is not in the handled set.
+
 ## 1.1.1 -- 2026-06-11
 
 ### Fixed
