@@ -6,13 +6,14 @@ namespace Glueful\Extensions\Subscriptions;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Helpers\Utils;
 
 /**
- * Tenant subscription lifecycle -- works fully with NO payvia installed
- * (free/trial/comp subscriptions never touch a payment object).
+ * Tenant subscription lifecycle -- works fully with NO payment provider
+ * installed (free/trial/comp subscriptions never touch a payment object).
  *
  * Holds the ApplicationContext from construction, so methods take no $ctx.
  */
@@ -20,19 +21,13 @@ final class SubscriptionService
 {
     private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
 
-    /** Injectable payvia seam: fn(string $gateway, string $gwSubId): ?array. */
-    private readonly ?\Closure $providerStatePuller;
-
     public function __construct(
         private readonly SubscriptionRepository $subscriptions,
         private readonly SubscriptionEventRepository $events,
         private readonly PlanCatalog $catalog,
         private readonly ApplicationContext $context,
-        ?callable $providerStatePuller = null,
+        private readonly ?ProviderStatePullerInterface $puller = null,
     ) {
-        $this->providerStatePuller = $providerStatePuller === null
-            ? null
-            : \Closure::fromCallable($providerStatePuller);
     }
 
     /** @return array<string,mixed>|null */
@@ -143,8 +138,8 @@ final class SubscriptionService
     /**
      * Pull authoritative provider state and re-derive local status (S8).
      *
-     * Payvia is a SOFT dependency: with no puller injected and payvia absent,
-     * this is a safe no-op returning the current row. Drift (status/period)
+     * The provider is a SOFT dependency: with no puller injected this is a
+     * safe no-op returning the current row. Drift (status/period)
      * is applied via updateByTenant and recorded as a `reconciled` event
      * (source `reconcile`, NULL logical key -- multiple NULLs are allowed).
      *
@@ -165,7 +160,7 @@ final class SubscriptionService
 
         $state = $this->pullProviderState($gateway, $gwSubId);
         if ($state === null) {
-            return $current; // payvia absent or provider unreachable -> no-op
+            return $current; // no puller, or provider unreachable -> no-op
         }
 
         $changes = $this->driftChanges($current, $state);
@@ -193,31 +188,14 @@ final class SubscriptionService
     }
 
     /**
-     * Resolve authoritative provider state. The injected puller wins (tests,
-     * custom wiring); otherwise the real payvia reconcile service is used only
-     * when its class exists (soft dep -- never required at compile time).
+     * Resolve authoritative provider state through the injected puller seam.
+     * Absent a puller (no provider installed), this is a safe null no-op.
      *
      * @return array<string,mixed>|null
      */
-    private function pullProviderState(string $gateway, string $gwSubId): ?array
+    private function pullProviderState(string $gateway, string $providerSubscriptionId): ?array
     {
-        if ($this->providerStatePuller !== null) {
-            $state = ($this->providerStatePuller)($gateway, $gwSubId);
-
-            return is_array($state) ? $state : null;
-        }
-
-        if (!class_exists(\Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class)) {
-            return null;
-        }
-
-        try {
-            $service = app($this->context, \Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class);
-
-            return $service->reconcile($gateway, $gwSubId);
-        } catch (\Throwable) {
-            return null; // provider/service failure degrades to "no drift applied"
-        }
+        return $this->puller?->pull($gateway, $providerSubscriptionId);
     }
 
     /**

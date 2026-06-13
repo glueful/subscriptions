@@ -8,8 +8,10 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Cache\CacheStore;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\ServiceProvider;
+use Glueful\Extensions\Subscriptions\Bridge\PayviaProviderStatePuller;
 use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
@@ -56,7 +58,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
      */
     public static function services(): array
     {
-        return [
+        $defs = [
             \Glueful\Entitlements\Contracts\EntitlementCheckerInterface::class => [
                 'class' => DefaultEntitlementChecker::class,
                 'shared' => true,
@@ -113,8 +115,8 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeEntitlementResolver'],
                 'shared' => true,
             ],
-            // Explicit factory: the optional payvia puller seam stays at its
-            // default (the service itself resolves payvia via class_exists).
+            // Explicit factory: resolves the optional ProviderStatePuller seam
+            // (bound only when a provider is installed; null otherwise).
             SubscriptionService::class => [
                 'factory' => [self::class, 'makeSubscriptionService'],
                 'shared' => true,
@@ -147,7 +149,29 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'shared' => true,
                 'autowire' => true,
             ],
+            // Safe to register unconditionally: the puller depends only on
+            // ApplicationContext and names payvia solely via a runtime string
+            // FQCN inside pull(), so it autoloads/constructs even with payvia absent.
+            PayviaProviderStatePuller::class => [
+                'class' => PayviaProviderStatePuller::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
         ];
+
+        // Bind the reconcile puller to the payvia implementation ONLY when payvia
+        // is installed. Absent payvia, ProviderStatePullerInterface stays unbound
+        // and SubscriptionService resolves a null puller (reconcile no-ops). A
+        // third-party provider binds this interface to its own puller instead.
+        if (class_exists(\Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class)) {
+            $defs[ProviderStatePullerInterface::class] = [
+                'class' => PayviaProviderStatePuller::class,
+                'shared' => true,
+                'autowire' => true,
+            ];
+        }
+
+        return $defs;
     }
 
     public static function makePlanCatalog(ContainerInterface $c): PlanCatalog
@@ -173,11 +197,16 @@ final class SubscriptionsServiceProvider extends ServiceProvider
 
     public static function makeSubscriptionService(ContainerInterface $c): SubscriptionService
     {
+        $puller = $c->has(ProviderStatePullerInterface::class)
+            ? $c->get(ProviderStatePullerInterface::class)
+            : null;
+
         return new SubscriptionService(
             $c->get(SubscriptionRepository::class),
             $c->get(SubscriptionEventRepository::class),
             $c->get(PlanCatalog::class),
             $c->get(ApplicationContext::class),
+            $puller,
         );
     }
 
