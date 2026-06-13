@@ -12,8 +12,8 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
  * Task 6.4 -- reconcile pulls authoritative provider state through the injectable
- * puller seam; with payvia absent (this suite) the default seam resolves to null
- * and reconcile is a safe no-op.
+ * puller seam; with no provider installed (this suite) the default seam resolves
+ * to null and reconcile is a safe no-op.
  */
 final class SubscriptionReconcileTest extends SubscriptionsTestCase
 {
@@ -36,9 +36,9 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
             ->get();
     }
 
-    public function testReconcileWithoutPayviaLinkIsNoOp(): void
+    public function testReconcileWithoutProviderLinkIsNoOp(): void
     {
-        // Free/comp subscription -- no payvia_subscription_id, and NO payvia
+        // Free/comp subscription -- no provider_subscription_id, and NO payvia
         // installed in this suite: must not throw, must return the row unchanged.
         $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'free', 'status' => 'active']);
 
@@ -61,8 +61,8 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $pulled = [];
@@ -83,7 +83,7 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
         self::assertCount(1, $events);
         self::assertSame('reconciled', $events[0]['type']);
         self::assertSame('reconcile', $events[0]['source']);
-        self::assertNull($events[0]['payvia_logical_event_key']);
+        self::assertNull($events[0]['provider_logical_event_key']);
         self::assertSame('active', $events[0]['from_status']);
         self::assertSame('past_due', $events[0]['to_status']);
     }
@@ -96,8 +96,8 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $row = $this->service(static fn(): array => ['status' => 'past_due'])->reconcile('tenantA');
@@ -118,8 +118,8 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $service = $this->service(static fn(): array => ['status' => 'past_due']);
@@ -146,8 +146,8 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $row = $this->service(static fn(): array => ['status' => 'active'])->reconcile('tenantA');
@@ -162,8 +162,8 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $row = $this->service(static fn(): ?array => null)->reconcile('tenantA');

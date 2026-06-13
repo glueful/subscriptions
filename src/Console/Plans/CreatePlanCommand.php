@@ -20,7 +20,7 @@ final class CreatePlanCommand extends BaseCommand
         $this->addOption('name', null, InputOption::VALUE_REQUIRED, 'Display name');
         $this->addOption('description', null, InputOption::VALUE_REQUIRED, 'Description');
         $this->addOption('status', null, InputOption::VALUE_REQUIRED, 'Status', 'active');
-        $this->addOption('payvia-priced-plan', null, InputOption::VALUE_REQUIRED, 'Payvia priced plan uuid');
+        $this->addOption('provider-price-id', null, InputOption::VALUE_REQUIRED, 'Provider price/plan identifier');
         $this->addOption('sort-order', null, InputOption::VALUE_REQUIRED, 'Sort order', '0');
         $this->addOption('entitlements', null, InputOption::VALUE_REQUIRED, 'Entitlements JSON object');
         $this->addOption('entitlements-file', null, InputOption::VALUE_REQUIRED, 'Path to entitlements JSON file');
@@ -34,7 +34,7 @@ final class CreatePlanCommand extends BaseCommand
                 'display_name' => $this->stringOption($input, 'name'),
                 'description' => $this->nullableStringOption($input, 'description'),
                 'status' => $this->stringOption($input, 'status'),
-                'payvia_priced_plan_uuid' => $this->nullableStringOption($input, 'payvia-priced-plan'),
+                'provider_price_id' => $this->nullableStringOption($input, 'provider-price-id'),
                 'sort_order' => (int) $this->stringOption($input, 'sort-order'),
                 'entitlements' => $this->entitlements($input),
             ];

@@ -21,12 +21,12 @@ final class ListPlansCommand extends BaseCommand
                 (string) ($plan['plan_key'] ?? ''),
                 (string) ($plan['display_name'] ?? ''),
                 (string) ($plan['status'] ?? ''),
-                (string) ($plan['payvia_priced_plan_uuid'] ?? ''),
+                (string) ($plan['provider_price_id'] ?? ''),
                 (string) ($plan['updated_at'] ?? ''),
             ];
         }
 
-        $this->table(['Key', 'Name', 'Status', 'Payvia', 'Updated'], $rows);
+        $this->table(['Key', 'Name', 'Status', 'Provider', 'Updated'], $rows);
 
         return self::SUCCESS;
     }

@@ -23,9 +23,9 @@ final class SubscriptionEventRepositoryTest extends SubscriptionsTestCase
         return array_merge([
             'tenant_uuid' => 'tenantA',
             'type' => 'subscription.past_due',
-            'source' => 'payvia_event',
-            'payvia_gateway' => 'paystack',
-            'payvia_logical_event_key' => 'k1',
+            'source' => 'provider_event',
+            'provider_gateway' => 'paystack',
+            'provider_logical_event_key' => 'k1',
         ], $overrides);
     }
 
@@ -40,7 +40,7 @@ final class SubscriptionEventRepositoryTest extends SubscriptionsTestCase
 
         try {
             $this->repo->insertOrThrow($this->appContext(), $this->event());
-            self::fail('Expected the (payvia_gateway, payvia_logical_event_key) unique violation to propagate.');
+            self::fail('Expected the (provider_gateway, provider_logical_event_key) unique violation to propagate.');
         } catch (\Throwable $e) {
             // The claim semantics depend on the violation PROPAGATING (the listener
             // wraps insertOrThrow in a transaction so a duplicate rolls back the
@@ -60,8 +60,8 @@ final class SubscriptionEventRepositoryTest extends SubscriptionsTestCase
 
     public function testSameLogicalKeyUnderDifferentGatewaySucceeds(): void
     {
-        self::assertTrue($this->repo->append($this->appContext(), $this->event(['payvia_gateway' => 'paystack'])));
-        self::assertTrue($this->repo->append($this->appContext(), $this->event(['payvia_gateway' => 'stripe'])));
+        self::assertTrue($this->repo->append($this->appContext(), $this->event(['provider_gateway' => 'paystack'])));
+        self::assertTrue($this->repo->append($this->appContext(), $this->event(['provider_gateway' => 'stripe'])));
         self::assertSame(2, $this->eventCount());
     }
 
@@ -70,8 +70,8 @@ final class SubscriptionEventRepositoryTest extends SubscriptionsTestCase
         $manual = $this->event([
             'type' => 'plan_changed',
             'source' => 'manual',
-            'payvia_gateway' => null,
-            'payvia_logical_event_key' => null,
+            'provider_gateway' => null,
+            'provider_logical_event_key' => null,
         ]);
 
         self::assertTrue($this->repo->append($this->appContext(), $manual));

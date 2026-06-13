@@ -18,14 +18,14 @@ final class SubscriptionRepository
     }
 
     /** @return array<string,mixed>|null */
-    public function findByPayviaSubscription(
+    public function findByProviderSubscription(
         ApplicationContext $context,
         string $gateway,
-        string $payviaSubscriptionId,
+        string $providerSubscriptionId,
     ): ?array {
         return db($context)->table('subscriptions')
-            ->where('payvia_gateway', '=', $gateway)
-            ->where('payvia_subscription_id', '=', $payviaSubscriptionId)
+            ->where('provider_gateway', '=', $gateway)
+            ->where('provider_subscription_id', '=', $providerSubscriptionId)
             ->limit(1)
             ->first();
     }
@@ -47,10 +47,10 @@ final class SubscriptionRepository
     }
 
     /** @return list<array<string,mixed>> */
-    public function allWithPayvia(ApplicationContext $context): array
+    public function allWithProvider(ApplicationContext $context): array
     {
         return db($context)->table('subscriptions')
-            ->whereRaw('payvia_subscription_id IS NOT NULL')
+            ->whereRaw('provider_subscription_id IS NOT NULL')
             ->orderBy(['created_at' => 'ASC'])
             ->get();
     }

@@ -31,7 +31,7 @@ final class MigrationsTest extends SubscriptionsTestCase
             'display_name',
             'description',
             'entitlements',
-            'payvia_priced_plan_uuid',
+            'provider_price_id',
             'status',
             'sort_order',
             'created_at',
@@ -92,22 +92,22 @@ final class MigrationsTest extends SubscriptionsTestCase
         $this->seedSubscription(['tenant_uuid' => $longTenant]);
     }
 
-    public function testPayviaSubscriptionUniquePerGatewayWithNullsUnconstrained(): void
+    public function testProviderSubscriptionUniquePerGatewayWithNullsUnconstrained(): void
     {
-        // Multiple all-NULL payvia rows (free/comp subscriptions) are unconstrained.
+        // Multiple all-NULL provider rows (free/comp subscriptions) are unconstrained.
         $this->seedSubscription(['tenant_uuid' => 'tenantA']);
         $this->seedSubscription(['tenant_uuid' => 'tenantB']);
 
         // The same provider subscription id under DIFFERENT gateways is two distinct rows.
         $this->seedSubscription([
             'tenant_uuid' => 'tenantC',
-            'payvia_gateway' => 'stripe',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'stripe',
+            'provider_subscription_id' => 'sub_X',
         ]);
         $this->seedSubscription([
             'tenant_uuid' => 'tenantD',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         self::assertSame(4, $this->connection()->table('subscriptions')->count());
@@ -116,8 +116,8 @@ final class MigrationsTest extends SubscriptionsTestCase
         $this->expectException(\Throwable::class);
         $this->seedSubscription([
             'tenant_uuid' => 'tenantE',
-            'payvia_gateway' => 'stripe',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'stripe',
+            'provider_subscription_id' => 'sub_X',
         ]);
     }
 
@@ -137,22 +137,22 @@ final class MigrationsTest extends SubscriptionsTestCase
         ]));
     }
 
-    public function testPayviaEventDedupeIsGatewayScopedAndAllowsNullLogicalKeys(): void
+    public function testProviderEventDedupeIsGatewayScopedAndAllowsNullLogicalKeys(): void
     {
         $base = [
             'tenant_uuid' => 'tenantA',
             'type' => 'subscription.updated',
-            'source' => 'payvia_event',
-            'payvia_logical_event_key' => 'subscription.updated:sub_1:v1',
+            'source' => 'provider_event',
+            'provider_logical_event_key' => 'subscription.updated:sub_1:v1',
         ];
 
         $this->connection()->table('subscription_events')->insert(array_merge($base, [
             'uuid' => Utils::generateNanoID(12),
-            'payvia_gateway' => 'stripe',
+            'provider_gateway' => 'stripe',
         ]));
         $this->connection()->table('subscription_events')->insert(array_merge($base, [
             'uuid' => Utils::generateNanoID(12),
-            'payvia_gateway' => 'paystack',
+            'provider_gateway' => 'paystack',
         ]));
 
         $this->connection()->table('subscription_events')->insert([
@@ -160,16 +160,16 @@ final class MigrationsTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'type' => 'manual',
             'source' => 'manual',
-            'payvia_gateway' => null,
-            'payvia_logical_event_key' => null,
+            'provider_gateway' => null,
+            'provider_logical_event_key' => null,
         ]);
         $this->connection()->table('subscription_events')->insert([
             'uuid' => Utils::generateNanoID(12),
             'tenant_uuid' => 'tenantA',
             'type' => 'manual',
             'source' => 'manual',
-            'payvia_gateway' => null,
-            'payvia_logical_event_key' => null,
+            'provider_gateway' => null,
+            'provider_logical_event_key' => null,
         ]);
 
         self::assertSame(4, $this->connection()->table('subscription_events')->count());
@@ -177,7 +177,7 @@ final class MigrationsTest extends SubscriptionsTestCase
         $this->expectException(\Throwable::class);
         $this->connection()->table('subscription_events')->insert(array_merge($base, [
             'uuid' => Utils::generateNanoID(12),
-            'payvia_gateway' => 'stripe',
+            'provider_gateway' => 'stripe',
         ]));
     }
 
@@ -256,7 +256,7 @@ final class MigrationsTest extends SubscriptionsTestCase
             'display_name' => 'Pro',
             'description' => null,
             'entitlements' => json_encode(['projects.limit' => 10], JSON_THROW_ON_ERROR),
-            'payvia_priced_plan_uuid' => null,
+            'provider_price_id' => null,
             'status' => 'active',
             'sort_order' => 10,
         ], $overrides));

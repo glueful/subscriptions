@@ -20,7 +20,7 @@ final class UpdatePlanCommand extends BaseCommand
         $this->addOption('name', null, InputOption::VALUE_REQUIRED, 'Display name');
         $this->addOption('description', null, InputOption::VALUE_REQUIRED, 'Description');
         $this->addOption('status', null, InputOption::VALUE_REQUIRED, 'Status');
-        $this->addOption('payvia-priced-plan', null, InputOption::VALUE_REQUIRED, 'Payvia priced plan uuid');
+        $this->addOption('provider-price-id', null, InputOption::VALUE_REQUIRED, 'Provider price/plan identifier');
         $this->addOption('sort-order', null, InputOption::VALUE_REQUIRED, 'Sort order');
         $this->addOption('entitlements', null, InputOption::VALUE_REQUIRED, 'Entitlements JSON object');
         $this->addOption('entitlements-file', null, InputOption::VALUE_REQUIRED, 'Path to entitlements JSON file');
@@ -37,7 +37,7 @@ final class UpdatePlanCommand extends BaseCommand
                     'name' => 'display_name',
                     'description' => 'description',
                     'status' => 'status',
-                    'payvia-priced-plan' => 'payvia_priced_plan_uuid',
+                    'provider-price-id' => 'provider_price_id',
                 ] as $option => $field
             ) {
                 $value = $this->nullableStringOption($input, $option);

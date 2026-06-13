@@ -23,13 +23,13 @@ final class CreateSubscriptionEventsTable implements MigrationInterface
             $table->string('from_status', 20)->nullable();
             $table->string('to_status', 20)->nullable();
             $table->string('source', 20);
-            $table->string('payvia_gateway', 50)->nullable();
-            $table->string('payvia_logical_event_key', 191)->nullable();
+            $table->string('provider_gateway', 50)->nullable();
+            $table->string('provider_logical_event_key', 191)->nullable();
             $table->json('data')->nullable();
             $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
 
             $table->unique('uuid');
-            $table->unique(['payvia_gateway', 'payvia_logical_event_key'], 'uniq_event_gateway_logical_key');
+            $table->unique(['provider_gateway', 'provider_logical_event_key'], 'uniq_event_gateway_logical_key');
             $table->index(['tenant_uuid', 'created_at'], 'idx_events_tenant_created');
         });
     }
@@ -41,6 +41,6 @@ final class CreateSubscriptionEventsTable implements MigrationInterface
 
     public function getDescription(): string
     {
-        return 'Creates subscription lifecycle event log with Payvia logical-key dedupe.';
+        return 'Creates subscription lifecycle event log with provider logical-key dedupe.';
     }
 }

@@ -62,8 +62,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'trialing',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('subscription.past_due', 'k1', ['gateway_subscription_id' => 'sub_X']);
@@ -79,9 +79,9 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
 
         $events = $this->connection()->table('subscription_events')->get();
         self::assertCount(1, $events);
-        self::assertSame('payvia_event', $events[0]['source']);
-        self::assertSame('paystack', $events[0]['payvia_gateway']);
-        self::assertSame('k1', $events[0]['payvia_logical_event_key']);
+        self::assertSame('provider_event', $events[0]['source']);
+        self::assertSame('paystack', $events[0]['provider_gateway']);
+        self::assertSame('k1', $events[0]['provider_logical_event_key']);
         self::assertSame('trialing', $events[0]['from_status']);
         self::assertSame('past_due', $events[0]['to_status']);
     }
@@ -92,8 +92,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'trialing',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('subscription.past_due', 'k1', ['gateway_subscription_id' => 'sub_X']);
@@ -138,8 +138,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'trialing',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $dispatch = static function () use ($listener): void {
@@ -173,8 +173,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
             'plan_key' => 'pro',
             'status' => 'past_due',
             'grace_ends_at' => '2026-06-13 00:00:00',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('payment.succeeded', 'k2', ['gateway_subscription_id' => 'sub_X']);
@@ -187,7 +187,7 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         self::assertCount(1, $events);
         self::assertSame('past_due', $events[0]['from_status']);
         self::assertSame('active', $events[0]['to_status']);
-        self::assertSame('k2', $events[0]['payvia_logical_event_key']);
+        self::assertSame('k2', $events[0]['provider_logical_event_key']);
     }
 
     public function testUnmappedGatewaySubscriptionIdNoOps(): void
@@ -195,8 +195,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('subscription.past_due', 'k9', ['gateway_subscription_id' => 'sub_GHOST']);
@@ -211,8 +211,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
             'status' => 'active',
-            'payvia_gateway' => 'stripe',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'stripe',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('subscription.past_due', 'k1', ['gateway_subscription_id' => 'sub_X'], gateway: 'paystack');
@@ -223,7 +223,7 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
 
     public function testSubscriptionCreatedRecoversLinkFromMetadataTenantUuid(): void
     {
-        // Tenant exists but has never been payvia-linked (e.g. started via checkout).
+        // Tenant exists but has never been provider-linked (e.g. started via checkout).
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
@@ -237,8 +237,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         ]);
 
         $row = $this->subscription();
-        self::assertSame('paystack', $row['payvia_gateway']);
-        self::assertSame('sub_NEW', $row['payvia_subscription_id']);
+        self::assertSame('paystack', $row['provider_gateway']);
+        self::assertSame('sub_NEW', $row['provider_subscription_id']);
         self::assertSame('active', $row['status']);
         self::assertSame(1, $this->eventCount());
     }
@@ -252,8 +252,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_EXISTING',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_EXISTING',
         ]);
 
         $logger = new CapturingLogger();
@@ -267,8 +267,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
 
         $row = $this->subscription();
         // Link is UNCHANGED -- the original provider subscription id survives.
-        self::assertSame('sub_EXISTING', $row['payvia_subscription_id']);
-        self::assertSame('paystack', $row['payvia_gateway']);
+        self::assertSame('sub_EXISTING', $row['provider_subscription_id']);
+        self::assertSame('paystack', $row['provider_gateway']);
         self::assertSame('active', $row['status']);
         // No projection, no recorded event.
         self::assertSame(0, $this->eventCount());
@@ -302,7 +302,7 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
 
         $row = $this->subscription();
         self::assertSame('incomplete', $row['status']);
-        self::assertEmpty($row['payvia_subscription_id'] ?? null);
+        self::assertEmpty($row['provider_subscription_id'] ?? null);
         self::assertSame(0, $this->eventCount());
     }
 
@@ -333,8 +333,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'canceled',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('subscription.created', 'k_late', [
@@ -359,8 +359,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'incomplete',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('subscription.created', 'k_new', [
@@ -378,8 +378,8 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
             'status' => 'active',
-            'payvia_gateway' => 'paystack',
-            'payvia_subscription_id' => 'sub_X',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
 
         $this->dispatch('subscription.canceled', 'k3', ['gateway_subscription_id' => 'sub_X']);

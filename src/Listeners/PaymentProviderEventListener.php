@@ -19,7 +19,7 @@ use Psr\Log\LoggerInterface;
  * and registration happens in the provider only when payvia's event class exists.
  *
  * Concurrency-safe idempotency is claim-first: the subscription_events insert
- * (unique on (payvia_gateway, payvia_logical_event_key)) and the projection run
+ * (unique on (provider_gateway, provider_logical_event_key)) and the projection run
  * in ONE transaction, so a duplicate/concurrent delivery that loses the claim
  * rolls back and never re-projects (e.g. grace is never extended twice).
  */
@@ -74,15 +74,15 @@ final class PaymentProviderEventListener
         try {
             db($this->context)->transaction(
                 function () use ($sub, $changes, $gateway, $logicalKey, $from, $to, $type, $normalized): void {
-                    // (1) CLAIM -- throws on (payvia_gateway, payvia_logical_event_key) duplicate.
+                    // (1) CLAIM -- throws on (provider_gateway, provider_logical_event_key) duplicate.
                     $this->events->insertOrThrow($this->context, [
                         'tenant_uuid' => (string) $sub['tenant_uuid'],
                         'type' => $type,
                         'from_status' => $from,
                         'to_status' => $to,
-                        'source' => 'payvia_event',
-                        'payvia_gateway' => $gateway !== '' ? $gateway : null,
-                        'payvia_logical_event_key' => $logicalKey !== '' ? $logicalKey : null,
+                        'source' => 'provider_event',
+                        'provider_gateway' => $gateway !== '' ? $gateway : null,
+                        'provider_logical_event_key' => $logicalKey !== '' ? $logicalKey : null,
                         'data' => $normalized,
                     ]);
 
@@ -98,8 +98,8 @@ final class PaymentProviderEventListener
                 // error would otherwise vanish silently. Debug-level by design.
                 $this->resolveLogger()?->debug('Duplicate provider event claim skipped', [
                     'event' => 'subscriptions.duplicate_claim_skipped',
-                    'payvia_gateway' => $gateway,
-                    'payvia_logical_event_key' => $logicalKey,
+                    'provider_gateway' => $gateway,
+                    'provider_logical_event_key' => $logicalKey,
                     'type' => $type,
                     'error' => $e->getMessage(),
                 ]);
@@ -136,7 +136,7 @@ final class PaymentProviderEventListener
     /**
      * Map provider (gateway, gateway_subscription_id) -> tenant subscription row.
      * On subscription.created an UNLINKED row can be recovered via the provider
-     * metadata's tenant_uuid -- writing BOTH payvia_gateway and payvia_subscription_id.
+     * metadata's tenant_uuid -- writing BOTH provider_gateway and provider_subscription_id.
      *
      * SECURITY: `metadata.tenant_uuid` flows verbatim from the provider webhook
      * payload (payvia passes provider metadata through unmodified), so it is NOT a
@@ -156,7 +156,7 @@ final class PaymentProviderEventListener
         $gwSubId = is_scalar($gwSubId) && (string) $gwSubId !== '' ? (string) $gwSubId : null;
 
         $sub = ($gateway !== '' && $gwSubId !== null)
-            ? $this->subscriptions->findByPayviaSubscription($this->context, $gateway, $gwSubId)
+            ? $this->subscriptions->findByProviderSubscription($this->context, $gateway, $gwSubId)
             : null;
 
         if ($sub !== null || $type !== 'subscription.created' || $gateway === '' || $gwSubId === null) {
@@ -178,17 +178,17 @@ final class PaymentProviderEventListener
 
         // Only attach when the target row is NOT already linked. We must never
         // overwrite an existing provider link based on provider-echoed metadata.
-        $existingSubId = $existing['payvia_subscription_id'] ?? null;
+        $existingSubId = $existing['provider_subscription_id'] ?? null;
         $existingSubId = is_scalar($existingSubId) ? (string) $existingSubId : '';
 
         if ($existingSubId !== '') {
-            $existingGateway = is_scalar($existing['payvia_gateway'] ?? null)
-                ? (string) $existing['payvia_gateway']
+            $existingGateway = is_scalar($existing['provider_gateway'] ?? null)
+                ? (string) $existing['provider_gateway']
                 : '';
 
             // Already linked to THIS exact (gateway, sub id): a no-op relink --
             // return the row so projection proceeds normally. (Defensive: the
-            // findByPayviaSubscription lookup above would already have matched it.)
+            // findByProviderSubscription lookup above would already have matched it.)
             if ($existingGateway === $gateway && $existingSubId === $gwSubId) {
                 return $existing;
             }
@@ -208,8 +208,8 @@ final class PaymentProviderEventListener
         }
 
         $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
-            'payvia_gateway' => $gateway,
-            'payvia_subscription_id' => $gwSubId,
+            'provider_gateway' => $gateway,
+            'provider_subscription_id' => $gwSubId,
         ]);
 
         return $this->subscriptions->findByTenant($this->context, $tenantUuid);

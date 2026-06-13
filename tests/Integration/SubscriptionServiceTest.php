@@ -12,8 +12,8 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
 /**
- * Task 6.2 -- the full no-payvia lifecycle (free/trial/comp): every path here runs
- * with no payvia class present.
+ * Task 6.2 -- the full no-provider lifecycle (free/trial/comp): every path here
+ * runs with no payment-provider class present.
  */
 final class SubscriptionServiceTest extends SubscriptionsTestCase
 {
@@ -39,7 +39,7 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
             ->get();
     }
 
-    public function testStartDefaultsToActiveWithNullPayvia(): void
+    public function testStartDefaultsToActiveWithNullProvider(): void
     {
         $row = $this->service->start('tenantA', 'free');
 
@@ -51,16 +51,16 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
         self::assertIsArray($stored);
         self::assertSame('free', $stored['plan_key']);
         self::assertSame('active', $stored['status']);
-        self::assertNull($stored['payvia_gateway']);
-        self::assertNull($stored['payvia_customer_id']);
-        self::assertNull($stored['payvia_subscription_id']);
+        self::assertNull($stored['provider_gateway']);
+        self::assertNull($stored['provider_customer_id']);
+        self::assertNull($stored['provider_subscription_id']);
 
         $events = $this->eventsFor('tenantA');
         self::assertCount(1, $events);
         self::assertSame('created', $events[0]['type']);
         self::assertSame('manual', $events[0]['source']);
         self::assertSame('active', $events[0]['to_status']);
-        self::assertNull($events[0]['payvia_logical_event_key']);
+        self::assertNull($events[0]['provider_logical_event_key']);
     }
 
     public function testStartTrialingFromOpts(): void
@@ -75,7 +75,7 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
         self::assertSame('pro', $stored['plan_key']);
         self::assertSame('trialing', $stored['status']);
         self::assertSame('2026-07-01 00:00:00', $stored['trial_ends_at']);
-        self::assertNull($stored['payvia_subscription_id']);
+        self::assertNull($stored['provider_subscription_id']);
     }
 
     public function testStartAcceptsActiveDbPlan(): void
@@ -204,7 +204,7 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
             'display_name' => ucfirst($planKey),
             'description' => null,
             'entitlements' => json_encode(['projects.limit' => 25], JSON_THROW_ON_ERROR),
-            'payvia_priced_plan_uuid' => null,
+            'provider_price_id' => null,
             'status' => $status,
             'sort_order' => 10,
             'created_at' => '2026-06-10 10:00:00',

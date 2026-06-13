@@ -42,7 +42,7 @@ final class SubscriptionService
     }
 
     /**
-     * @param array<string,mixed> $opts status, trial_ends_at, current_period_end, payvia_* keys, metadata
+     * @param array<string,mixed> $opts status, trial_ends_at, current_period_end, provider_* keys, metadata
      * @return array<string,mixed>
      */
     public function start(string $tenantUuid, string $planKey, array $opts = []): array
@@ -58,11 +58,11 @@ final class SubscriptionService
             'status' => $status,
             'trial_ends_at' => $opts['trial_ends_at'] ?? null,
             'current_period_end' => $opts['current_period_end'] ?? null,
-            'payvia_gateway' => $opts['payvia_gateway'] ?? null,
-            'payvia_customer_id' => $opts['payvia_customer_id'] ?? null,
-            'payvia_subscription_id' => $opts['payvia_subscription_id'] ?? null,
-            'payvia_priced_plan_uuid' => $opts['payvia_priced_plan_uuid']
-                ?? $this->catalog->pricedPlanUuid($planKey),
+            'provider_gateway' => $opts['provider_gateway'] ?? null,
+            'provider_customer_id' => $opts['provider_customer_id'] ?? null,
+            'provider_subscription_id' => $opts['provider_subscription_id'] ?? null,
+            'provider_price_id' => $opts['provider_price_id']
+                ?? $this->catalog->providerPriceId($planKey),
             'metadata' => $opts['metadata'] ?? null,
         ];
 
@@ -90,7 +90,7 @@ final class SubscriptionService
 
         $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
             'plan_key' => $planKey,
-            'payvia_priced_plan_uuid' => $this->catalog->pricedPlanUuid($planKey),
+            'provider_price_id' => $this->catalog->providerPriceId($planKey),
         ]);
 
         $this->events->append($this->context, [
@@ -157,8 +157,8 @@ final class SubscriptionService
             return null;
         }
 
-        $gateway = (string) ($current['payvia_gateway'] ?? '');
-        $gwSubId = (string) ($current['payvia_subscription_id'] ?? '');
+        $gateway = (string) ($current['provider_gateway'] ?? '');
+        $gwSubId = (string) ($current['provider_subscription_id'] ?? '');
         if ($gwSubId === '') {
             return $current; // free/comp -- nothing to pull
         }
@@ -184,8 +184,8 @@ final class SubscriptionService
             'from_status' => $fromStatus,
             'to_status' => $toStatus,
             'source' => 'reconcile',
-            'payvia_gateway' => $gateway !== '' ? $gateway : null,
-            'payvia_logical_event_key' => null,
+            'provider_gateway' => $gateway !== '' ? $gateway : null,
+            'provider_logical_event_key' => null,
             'data' => $state,
         ]);
 

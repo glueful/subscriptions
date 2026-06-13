@@ -13,7 +13,7 @@ return [
             ],
         ],
         'pro' => [
-            'payvia_priced_plan' => null,
+            'provider_price_id' => null,
             'entitlements' => [
                 'reports.export' => true,
                 'projects.limit' => 50,

@@ -96,14 +96,14 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
 
     public function testPricedPlanUuidPrefersResolvableDbPlanOverConfig(): void
     {
-        $this->setConfig('subscriptions.plans.pro.payvia_priced_plan', 'configPrice1');
+        $this->setConfig('subscriptions.plans.pro.provider_price_id', 'configPrice1');
         $this->seedPlan([
             'plan_key' => 'pro',
-            'payvia_priced_plan_uuid' => 'dbPrice0001',
+            'provider_price_id' => 'dbPrice0001',
             'status' => 'active',
         ]);
 
-        self::assertSame('dbPrice0001', PlanCatalog::fromContext($this->appContext())->pricedPlanUuid('pro'));
+        self::assertSame('dbPrice0001', PlanCatalog::fromContext($this->appContext())->providerPriceId('pro'));
     }
 
     public function testVersionChangesWhenDbPlanUpdatedAtChanges(): void
@@ -142,7 +142,7 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
             'display_name' => 'Pro',
             'description' => null,
             'entitlements' => json_encode(['projects.limit' => 100], JSON_THROW_ON_ERROR),
-            'payvia_priced_plan_uuid' => null,
+            'provider_price_id' => null,
             'status' => 'active',
             'sort_order' => 10,
             'created_at' => '2026-06-10 10:00:00',

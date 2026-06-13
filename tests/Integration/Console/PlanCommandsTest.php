@@ -205,7 +205,7 @@ final class PlanCommandsTest extends SubscriptionsTestCase
 
     public function testListPrintsPlanFields(): void
     {
-        $this->createPlan('team', ['payvia_priced_plan_uuid' => 'price1234567']);
+        $this->createPlan('team', ['provider_price_id' => 'price1234567']);
 
         $command = new ListPlansCommand();
         $this->bindCommand($command);
