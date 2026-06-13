@@ -228,6 +228,13 @@ final class PaymentProviderEventListener
 
         switch ($type) {
             case 'subscription.created':
+                // A late or replayed subscription.created (distinct logical key, so
+                // idempotency does not suppress it) must never resurrect a terminal
+                // canceled subscription. Record/claim the event but project nothing.
+                if ($currentStatus === 'canceled') {
+                    return [];
+                }
+
                 $changes = [
                     'status' => $this->normalizedStatus($normalized) === 'trialing' ? 'trialing' : 'active',
                 ];

@@ -13,6 +13,11 @@ All notable changes to `glueful/subscriptions` are documented here.
   linked to a different provider subscription is logged as an anomaly
   (`subscriptions.relink_conflict_skipped`, no payload) and no-ops instead of
   silently stealing the link.
+- Do not resurrect a canceled subscription on a late or replayed
+  `subscription.created` event. When the stored status is already `canceled`, the
+  event is still recorded/claimed but no status change is projected, so a
+  delayed creation event can no longer flip a terminal subscription back to
+  active.
 
 ## 1.1.1 -- 2026-06-11
 

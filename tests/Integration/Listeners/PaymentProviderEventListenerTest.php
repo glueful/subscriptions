@@ -325,6 +325,54 @@ final class PaymentProviderEventListenerTest extends SubscriptionsTestCase
         self::assertSame(0, $this->eventCount());
     }
 
+    public function testLateSubscriptionCreatedDoesNotResurrectCanceledSubscription(): void
+    {
+        // Already-linked, terminal canceled subscription. A late/replayed
+        // subscription.created (fresh logical key) must NOT flip it back to active.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'canceled',
+            'payvia_gateway' => 'paystack',
+            'payvia_subscription_id' => 'sub_X',
+        ]);
+
+        $this->dispatch('subscription.created', 'k_late', [
+            'gateway_subscription_id' => 'sub_X',
+            'status' => 'active',
+        ]);
+
+        $row = $this->subscription();
+        // Status stays canceled -- no state regression.
+        self::assertSame('canceled', $row['status']);
+        // The event is still recorded as handled (claimed), just with no projection.
+        $events = $this->connection()->table('subscription_events')->get();
+        self::assertCount(1, $events);
+        self::assertSame('canceled', $events[0]['from_status']);
+        self::assertSame('canceled', $events[0]['to_status']);
+    }
+
+    public function testSubscriptionCreatedActivatesNonCanceledSubscription(): void
+    {
+        // Fresh, non-canceled (incomplete) subscription -> normal activation.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'incomplete',
+            'payvia_gateway' => 'paystack',
+            'payvia_subscription_id' => 'sub_X',
+        ]);
+
+        $this->dispatch('subscription.created', 'k_new', [
+            'gateway_subscription_id' => 'sub_X',
+            'status' => 'active',
+        ]);
+
+        $row = $this->subscription();
+        self::assertSame('active', $row['status']);
+        self::assertSame(1, $this->eventCount());
+    }
+
     public function testSubscriptionCanceledProjectsCanceledAt(): void
     {
         $this->seedSubscription([
