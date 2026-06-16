@@ -4,6 +4,14 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## Unreleased
 
+## 1.3.1 -- 2026-06-16
+
+### Fixed
+
+- Register migration paths during provider boot so `migrate:run` sees the
+  subscriptions schema through the same CLI lifecycle used by other extension
+  migrations.
+
 ## 1.3.0 -- 2026-06-14
 
 ### Changed
