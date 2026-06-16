@@ -237,7 +237,10 @@ final class SubscriptionsServiceProvider extends ServiceProvider
     public function register(ApplicationContext $context): void
     {
         $this->mergeConfig('subscriptions', require __DIR__ . '/../config/subscriptions.php');
+    }
 
+    public function boot(ApplicationContext $context): void
+    {
         try {
             $this->loadMigrationsFrom(
                 __DIR__ . '/../migrations',
@@ -250,10 +253,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 throw $e; // fail fast in non-production
             }
         }
-    }
 
-    public function boot(ApplicationContext $context): void
-    {
         try {
             $this->app->get(\Glueful\Extensions\ExtensionManager::class)->registerMeta(self::class, [
                 'slug' => 'subscriptions',
