@@ -8,8 +8,10 @@ use Glueful\Cache\CacheStore;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
+use Glueful\Extensions\Subscriptions\Tests\Support\CapturingLogger;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
@@ -226,5 +228,86 @@ final class EntitlementResolverTest extends SubscriptionsTestCase
         $resolver = $this->resolver(null, true);
 
         self::assertSame(self::PRO, $resolver->resolveMap($this->appContext(), 'tenantA'));
+    }
+
+    // ===========================================
+    // C1 -- the spec §3.3 fresh-install diagnostic
+    // ===========================================
+
+    /**
+     * A fresh 2.0 install that runs `migrate:run` but never
+     * `subscriptions:plans:import-config` has an EMPTY subscription_plans table.
+     * Because the catalog is DB-authoritative since 2.0 (config plans are seeds,
+     * not a runtime overlay), every entitlement then resolves to `[]` -- an install
+     * that is silently non-functional and looks exactly like "no entitlements".
+     * The resolver must say so, loudly, once per resolve -- and must NOT throw:
+     * entitlement checks stay fail-closed-not-fatal.
+     */
+    public function testFreshInstallWithNoPlatformPlansLogsTheImportDiagnosticAndResolvesEmpty(): void
+    {
+        $this->clearPlatformPlans(); // the fresh-install shape: no platform plan rows at all
+        $logger = new CapturingLogger();
+        $this->bind('logger', $logger);
+
+        $map = $this->resolver()->resolveMap($this->appContext(), 'tenantA');
+
+        self::assertSame([], $map);
+
+        $errors = array_values(array_filter(
+            $logger->records(),
+            static fn (array $r): bool => ($r['context']['event'] ?? null) === 'subscriptions.default_plan_unresolvable'
+        ));
+        self::assertCount(1, $errors, 'exactly one diagnostic per resolve');
+        self::assertSame('error', $errors[0]['level']);
+        self::assertStringContainsString('subscriptions:plans:import-config', $errors[0]['message']);
+        self::assertStringContainsString('free', $errors[0]['message']); // names the missing default_plan key
+        self::assertSame('free', $errors[0]['context']['default_plan']);
+        self::assertSame('subscriptions:plans:import-config', $errors[0]['context']['command']);
+    }
+
+    public function testTheFreshInstallDiagnosticIsNotEmittedWhenTheDefaultPlanResolves(): void
+    {
+        $logger = new CapturingLogger();
+        $this->bind('logger', $logger);
+
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'pro', 'status' => 'active']);
+        self::assertSame(self::PRO, $this->resolver()->resolveMap($this->appContext(), 'tenantA'));
+
+        self::assertSame([], array_values(array_filter(
+            $logger->records(),
+            static fn (array $r): bool => ($r['context']['event'] ?? null) === 'subscriptions.default_plan_unresolvable'
+        )));
+    }
+
+    public function testTheFreshInstallDiagnosticNeverThrowsWithNoLoggerBound(): void
+    {
+        $this->clearPlatformPlans();
+
+        // No 'logger' binding at all -- the defensive resolve must degrade to a no-op.
+        self::assertSame([], $this->resolver()->resolveMap($this->appContext(), 'tenantA'));
+    }
+
+    /**
+     * C2: the shipped writer's output must be honoured by the tenant resolver --
+     * this is the end-to-end proof that OverrideRepository::upsertForSubject() is a
+     * safe replacement for the direct 1.x-shaped insert (which post-006 leaves
+     * subject_uuid at `''` and is silently ignored, turning a deny into a grant).
+     */
+    public function testAnOverrideWrittenByUpsertForSubjectIsHonouredByTheTenantResolver(): void
+    {
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'pro', 'status' => 'active']);
+
+        $overrides = new OverrideRepository();
+        $overrides->upsertForSubject($this->appContext(), Subject::tenant('tenantA'), 'reports.export', false);
+        $overrides->upsertForSubject($this->appContext(), Subject::tenant('tenantA'), 'projects.limit', 5);
+
+        $map = $this->resolver()->resolveMap($this->appContext(), 'tenantA');
+
+        self::assertFalse($map['reports.export'], 'a deny override must actually DENY');
+        self::assertSame(5, $map['projects.limit']);
+
+        $overrides->deleteForSubject($this->appContext(), Subject::tenant('tenantA'), 'reports.export');
+
+        self::assertTrue($this->resolver()->resolveMap($this->appContext(), 'tenantA')['reports.export']);
     }
 }

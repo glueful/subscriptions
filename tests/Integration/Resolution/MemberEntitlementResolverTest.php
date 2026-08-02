@@ -11,6 +11,7 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
 use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolver;
+use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 use Psr\Log\LoggerInterface;
@@ -308,5 +309,26 @@ final class MemberEntitlementResolverTest extends SubscriptionsTestCase
         $after = $tenantResolver->resolveMap($this->appContext(), self::TENANT);
 
         self::assertSame($before, $after);
+    }
+
+    /** C2: the shipped writer's output must be honoured by the member resolver too. */
+    public function testAnOverrideWrittenByUpsertForSubjectIsHonouredByTheMemberResolver(): void
+    {
+        $this->seedWorkspacePlan('pro', ['content.premium' => true, 'downloads.limit' => 3]);
+        $this->seedMembership(['plan_key' => 'pro']);
+
+        $overrides = new OverrideRepository();
+        $subject = Subject::user(self::TENANT, self::USER);
+        $overrides->upsertForSubject($this->appContext(), $subject, 'content.premium', false);
+        $overrides->upsertForSubject($this->appContext(), $subject, 'downloads.limit', 99);
+
+        $map = $this->resolver()->resolveMap($this->appContext(), self::TENANT, self::USER);
+
+        self::assertFalse($map['content.premium'], 'a deny override must actually DENY');
+        self::assertSame(99, $map['downloads.limit']);
+
+        $overrides->deleteForSubject($this->appContext(), $subject, 'content.premium');
+
+        self::assertTrue($this->resolver()->resolveMap($this->appContext(), self::TENANT, self::USER)['content.premium']);
     }
 }

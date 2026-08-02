@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Subscriptions\Resolution;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Cache\CacheStore;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Lifecycle\TenantIntegration;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Subject;
@@ -84,8 +85,22 @@ final class MemberEntitlementResolver
         $this->assertCatalogScopeMatches($tenantUuid);
 
         $subject = Subject::user($tenantUuid, $userUuid);
-        $subscription = $this->subscriptions->findBySubject($context, $subject);
-        $overrides = $this->overrides->activeForSubject($context, $subject);
+
+        // SYSTEM mode, for exactly the same reason as EntitlementResolver::resolveMap()
+        // (spec §9): `subscriptions`/`subscription_overrides` are registered as
+        // tenant-owned tables, so a tenancy host injects the ambient tenant_uuid into
+        // these reads. This API is explicitly parameterized by ($tenantUuid, $userUuid)
+        // -- a host resolves a member's map from a job, a CLI, or a request running in
+        // a different tenant's context -- and the triple-match WHERE already pins the
+        // exact subject, so ambient injection could only narrow a correct query to
+        // nothing and silently return an empty map. Mirrors
+        // SubscriptionEventProjector::project()'s system-mode wrap.
+        /** @var array{0:array<string,mixed>|null,1:array<string,mixed>} $reads */
+        $reads = TenantIntegration::runAsSystemOr($context, fn (): array => [
+            $this->subscriptions->findBySubject($context, $subject),
+            $this->overrides->activeForSubject($context, $subject),
+        ]);
+        [$subscription, $overrides] = $reads;
 
         if (!$this->cacheEnabled || $this->cache === null) {
             return $this->resolveFresh($context, $subscription, $overrides);
