@@ -55,6 +55,37 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     private const SETTLEABLE = ['trialing', 'past_due'];
     private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
 
+    /**
+     * Column bounds for every PROVIDER-SOURCED string this class writes (spec §8 --
+     * the projector is the trust boundary for provider input, so it is also the
+     * length boundary). SQLite ignores VARCHAR(n); MySQL in strict mode and
+     * PostgreSQL both RAISE on overflow, and a raised data error inside the
+     * receipt claim rolls the whole transaction back and propagates -- which the
+     * webhook layer is documented to answer with a retry-inducing 5xx. A provider
+     * that keeps sending the same over-length metadata would therefore retry that
+     * event forever, never producing a receipt and never being diagnosable.
+     * Clamping at this boundary converts that into a committed receipt carrying a
+     * truncated (still diagnosable) value.
+     *
+     * Each bound mirrors the migration's declared column width exactly:
+     *   provider_gateway              VARCHAR(50)  -- 001/003 + 006 receipts
+     *   event_type / events.type      VARCHAR(40)  -- 003 + 006 receipts
+     *   provider_logical_event_key    VARCHAR(191) -- 003 + 006 receipts
+     *   provider_subscription_id      VARCHAR(191) -- 001
+     *   candidate_tenant_uuid         VARCHAR(64)  -- 006 receipts
+     *   candidate_subject_type        VARCHAR(10)  -- 006 receipts
+     *   candidate_subject_uuid        VARCHAR(64)  -- 006 receipts
+     *   candidate_plan_uuid           VARCHAR(12)  -- 006 receipts
+     */
+    private const MAX_GATEWAY = 50;
+    private const MAX_EVENT_TYPE = 40;
+    private const MAX_LOGICAL_KEY = 191;
+    private const MAX_PROVIDER_SUBSCRIPTION_ID = 191;
+    private const MAX_CANDIDATE_TENANT_UUID = 64;
+    private const MAX_CANDIDATE_SUBJECT_TYPE = 10;
+    private const MAX_CANDIDATE_SUBJECT_UUID = 64;
+    private const MAX_CANDIDATE_PLAN_UUID = 12;
+
     public function __construct(
         private readonly SubscriptionRepository $subscriptions,
         private readonly SubscriptionEventRepository $events,
@@ -80,9 +111,15 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
 
     private function projectInTransaction(ProviderSubscriptionEvent $event): void
     {
-        $gateway = $event->gateway;
-        $type = $event->type;
-        $logicalKey = $event->logicalEventKey;
+        // Clamp the three provider-sourced identity strings ONCE, here at the
+        // boundary, before anything reads or writes them: the same clamped values
+        // then drive the read-side early-out, the receipt claim, and the
+        // subscription_events insert, so the idempotency gate can never disagree
+        // with what was actually stored. (The events table declares the exact same
+        // widths as the receipts table for all three -- see the bounds block above.)
+        $gateway = $this->clamp($event->gateway, self::MAX_GATEWAY);
+        $type = $this->clamp($event->type, self::MAX_EVENT_TYPE);
+        $logicalKey = $this->clamp($event->logicalEventKey, self::MAX_LOGICAL_KEY);
         $normalized = $event->normalized;
 
         // Cheap read-side early-out ONLY -- the transactional claim below is the gate.
@@ -188,11 +225,28 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     {
         $metadata = is_array($normalized['metadata'] ?? null) ? $normalized['metadata'] : [];
 
+        // Clamped to the receipt columns' declared widths (see the bounds block at
+        // the top of this class): these are UNVALIDATED provider strings landing in
+        // deliberately narrow diagnostic columns (candidate_subject_type is
+        // VARCHAR(10), candidate_plan_uuid VARCHAR(12)), so an unbounded value here
+        // is exactly the "receipt insert raises a data error -> retry forever" path.
         return [
-            'candidate_tenant_uuid' => $this->scalarOrNull($metadata['tenant_uuid'] ?? null),
-            'candidate_subject_type' => $this->scalarOrNull($metadata['subject_type'] ?? null),
-            'candidate_subject_uuid' => $this->scalarOrNull($metadata['subject_uuid'] ?? null),
-            'candidate_plan_uuid' => $this->scalarOrNull($metadata['plan_uuid'] ?? null),
+            'candidate_tenant_uuid' => $this->clampOrNull(
+                $this->scalarOrNull($metadata['tenant_uuid'] ?? null),
+                self::MAX_CANDIDATE_TENANT_UUID
+            ),
+            'candidate_subject_type' => $this->clampOrNull(
+                $this->scalarOrNull($metadata['subject_type'] ?? null),
+                self::MAX_CANDIDATE_SUBJECT_TYPE
+            ),
+            'candidate_subject_uuid' => $this->clampOrNull(
+                $this->scalarOrNull($metadata['subject_uuid'] ?? null),
+                self::MAX_CANDIDATE_SUBJECT_UUID
+            ),
+            'candidate_plan_uuid' => $this->clampOrNull(
+                $this->scalarOrNull($metadata['plan_uuid'] ?? null),
+                self::MAX_CANDIDATE_PLAN_UUID
+            ),
         ];
     }
 
@@ -215,7 +269,14 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
      */
     private function resolveTarget(string $gateway, string $type, array $normalized): array
     {
-        $gwSubId = $this->scalarOrNull($normalized['gateway_subscription_id'] ?? null);
+        // Clamped for the same reason as the identity strings above: a successful
+        // relink WRITES this straight into subscriptions.provider_subscription_id
+        // VARCHAR(191). Clamping before the lookup as well as before the write keeps
+        // find and store symmetric.
+        $gwSubId = $this->clampOrNull(
+            $this->scalarOrNull($normalized['gateway_subscription_id'] ?? null),
+            self::MAX_PROVIDER_SUBSCRIPTION_ID
+        );
 
         $sub = ($gateway !== '' && $gwSubId !== null)
             ? $this->subscriptions->findByProviderSubscription($this->context, $gateway, $gwSubId)
@@ -457,6 +518,25 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     private function scalarOrNull(mixed $value): ?string
     {
         return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
+    }
+
+    /**
+     * Truncate a provider-sourced string to its destination column's declared
+     * width. `mb_substr` (not `substr`) so a multibyte value is cut on a character
+     * boundary -- the schema widths are character counts (VARCHAR(n)) on both MySQL
+     * and PostgreSQL, and a byte-wise cut could also emit an invalid UTF-8 tail that
+     * PostgreSQL would then reject outright, reintroducing the very data error this
+     * clamp exists to prevent.
+     */
+    private function clamp(string $value, int $max): string
+    {
+        return mb_strlen($value) <= $max ? $value : mb_substr($value, 0, $max);
+    }
+
+    /** clamp() for an optional value: `null` ("not supplied") passes through. */
+    private function clampOrNull(?string $value, int $max): ?string
+    {
+        return $value === null ? null : $this->clamp($value, $max);
     }
 
     /**

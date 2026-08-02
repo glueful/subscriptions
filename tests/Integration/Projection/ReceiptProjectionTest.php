@@ -817,4 +817,128 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertSame(1, $this->eventCount());
         self::assertSame(1, $this->receiptCount());
     }
+
+    // ===========================================
+    // I2 -- unbounded provider strings vs narrow receipt columns
+    // ===========================================
+    //
+    // Every string on this path is provider-controlled and lands in a deliberately
+    // narrow column (candidate_subject_type VARCHAR(10), candidate_plan_uuid
+    // VARCHAR(12), provider_gateway VARCHAR(50), event_type VARCHAR(40), ...).
+    // SQLite -- this harness -- silently stores an over-length value, but MySQL in
+    // strict mode and PostgreSQL RAISE a data error, which inside the claim
+    // transaction rolls everything back and propagates: no receipt, no diagnosis,
+    // and a provider that redelivers the identical payload retries FOREVER. The
+    // projector therefore clamps at its boundary; what these tests assert is that
+    // the stored values ARE clamped (the observable part of the fix on any driver),
+    // which is exactly what keeps the strict-driver insert inside its bounds.
+
+    public function testOverLengthProviderMetadataStillCommitsAReceiptWithClampedCandidateValues(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'incomplete',
+        ]);
+
+        $this->project('subscription.created', 'k1', [
+            'gateway_subscription_id' => 'sub_NEW',
+            'status' => 'active',
+            'metadata' => [
+                'tenant_uuid' => str_repeat('T', 500),
+                'subject_type' => str_repeat('S', 500),
+                'subject_uuid' => str_repeat('U', 500),
+                'plan_uuid' => str_repeat('P', 500),
+            ],
+        ]);
+
+        // Deterministic rejection (the 500-char subject_type is not a valid subject),
+        // COMMITTED -- never a rethrown data error.
+        $receipt = $this->receiptFor('paystack', 'k1');
+        self::assertIsArray($receipt);
+        self::assertSame('rejected', $receipt['outcome']);
+        self::assertSame('invalid_subject', $receipt['rejection_code']);
+
+        self::assertSame(str_repeat('T', 64), $receipt['candidate_tenant_uuid']);
+        self::assertSame(str_repeat('S', 10), $receipt['candidate_subject_type']);
+        self::assertSame(str_repeat('U', 64), $receipt['candidate_subject_uuid']);
+        self::assertSame(str_repeat('P', 12), $receipt['candidate_plan_uuid']);
+
+        self::assertSame('incomplete', $this->row()['status']);
+        self::assertSame(0, $this->eventCount());
+    }
+
+    public function testOverLengthGatewayAndEventTypeAreClampedOnBothReceiptAndEventWithoutBreakingAcceptance(): void
+    {
+        $gateway = str_repeat('g', 500);
+        $type = str_repeat('t', 500);
+        $logicalKey = str_repeat('k', 500);
+
+        // The row is linked using the CLAMPED gateway: clamping happens before the
+        // lookup as well as before the write, so find and store stay symmetric.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'trialing',
+            'provider_gateway' => substr($gateway, 0, 50),
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $this->project($type, $logicalKey, ['gateway_subscription_id' => 'sub_X'], gateway: $gateway);
+
+        $receipt = $this->receiptFor(str_repeat('g', 50), str_repeat('k', 191));
+        self::assertIsArray($receipt);
+        self::assertSame('accepted', $receipt['outcome']);
+        self::assertSame(str_repeat('g', 50), $receipt['provider_gateway']);
+        self::assertSame(str_repeat('t', 40), $receipt['event_type']);
+        self::assertSame(str_repeat('k', 191), $receipt['provider_logical_event_key']);
+
+        // The subscription_events row declares the SAME widths and gets the SAME
+        // clamped values -- one clamp at the boundary, both writes consistent.
+        $event = $this->eventRowFor(str_repeat('g', 50), str_repeat('k', 191));
+        self::assertIsArray($event);
+        self::assertSame(str_repeat('t', 40), $event['type']);
+        self::assertSame(1, $this->eventCount());
+    }
+
+    public function testAnOverLengthLogicalKeyStillDeduplicatesAfterClamping(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'trialing',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $key = str_repeat('k', 500);
+        $this->project('subscription.past_due', $key, ['gateway_subscription_id' => 'sub_X']);
+        $this->project('subscription.past_due', $key, ['gateway_subscription_id' => 'sub_X']);
+
+        self::assertSame(1, $this->receiptCount());
+        self::assertSame(1, $this->eventCount());
+        self::assertIsArray($this->receiptFor('paystack', str_repeat('k', 191)));
+    }
+
+    public function testAnOverLengthGatewaySubscriptionIdIsClampedBeforeTheRelinkWrite(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'incomplete',
+        ]);
+
+        $this->project('subscription.created', 'k1', [
+            'gateway_subscription_id' => str_repeat('s', 500),
+            'status' => 'active',
+            'metadata' => ['tenant_uuid' => 'tenantA'],
+        ]);
+
+        $receipt = $this->receiptFor('paystack', 'k1');
+        self::assertIsArray($receipt);
+        self::assertSame('accepted', $receipt['outcome']);
+
+        // provider_subscription_id is VARCHAR(191); the relink stored the clamp.
+        self::assertSame(str_repeat('s', 191), $this->row()['provider_subscription_id']);
+    }
 }
