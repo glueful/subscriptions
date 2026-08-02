@@ -53,15 +53,34 @@ final class SubscriptionSubjectDataPurger
     {
     }
 
-    /** @return array<string,int> rows deleted, keyed by table name */
+    /**
+     * @return array<string,int> rows deleted, keyed by table name
+     * @throws \InvalidArgumentException on an incoherent/empty subject (spec §4's
+     *         coherence rule -- this purger does NOT itself call
+     *         `SubjectResolverInterface::validate()`, so an empty tenant_uuid or
+     *         subject_uuid would otherwise sweep every row that happens to share
+     *         that same empty string rather than refusing outright).
+     */
     public function purgeSubject(Subject $subject): array
     {
+        $this->assertPurgeableSubject($subject);
+
         return TenantIntegration::runAsSystemOr(
             $this->context,
             fn (): array => $subject->type === SubjectType::TENANT
                 ? $this->purgeTenant($subject->tenantUuid)
                 : $this->purgeUser($subject)
         );
+    }
+
+    private function assertPurgeableSubject(Subject $subject): void
+    {
+        if ($subject->tenantUuid === '' || $subject->uuid === '') {
+            throw new \InvalidArgumentException(
+                'Refusing to purge a subject with an empty tenant_uuid or subject_uuid; '
+                . 'purging it would be a programming error, not a real subject.'
+            );
+        }
     }
 
     /** @return array<string,int> */

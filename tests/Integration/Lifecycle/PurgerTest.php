@@ -379,4 +379,29 @@ final class PurgerTest extends SubscriptionsTestCase
         self::assertGreaterThan(0, array_sum($counts));
         self::assertFalse($this->subscriptionExists('tenantA', 'user', 'user-1'));
     }
+
+    // ---------------------------------------------------------------
+    // Safety guard: an empty tenant_uuid/subject_uuid is never a real subject
+    // ---------------------------------------------------------------
+
+    public function testPurgeSubjectRefusesAnEmptyTenantSubject(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->purger()->purgeSubject(Subject::tenant(''));
+    }
+
+    public function testPurgeSubjectRefusesAUserSubjectWithAnEmptyTenantUuid(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->purger()->purgeSubject(Subject::user('', 'user-1'));
+    }
+
+    public function testPurgeSubjectRefusesAUserSubjectWithAnEmptyUserUuid(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->purger()->purgeSubject(Subject::user('tenantA', ''));
+    }
 }
