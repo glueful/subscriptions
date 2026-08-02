@@ -9,11 +9,11 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
 /**
- * Task 6: every SubscriptionPlanRepository finder gains a scope-aware sibling
+ * Every SubscriptionPlanRepository finder gains a scope-aware sibling
  * (findByUuid, findByKeyInScope, findResolvableByKeyInScope, listInScope,
- * maxUpdatedAtInScope) added ALONGSIDE the byte-compatible 1.x names, which
- * remain untouched through Task 8. Task 9 switches the 1.x names to the
- * platform scope ('tenant', '').
+ * maxUpdatedAtInScope) added alongside the byte-compatible 1.x names, which
+ * are now pinned to the platform scope ('tenant', '') since the coordinated
+ * activation.
  */
 final class SubscriptionPlanRepositoryScopeTest extends SubscriptionsTestCase
 {

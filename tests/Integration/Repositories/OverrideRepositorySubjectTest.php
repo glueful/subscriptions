@@ -10,8 +10,9 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
 /**
- * Task 6: activeForSubject() added alongside the byte-compatible
- * activeForTenant() (Task 9 switches it to a Subject::tenant delegate).
+ * activeForSubject() added alongside the byte-compatible activeForTenant(),
+ * which is now a Subject::tenant delegate of it since the coordinated
+ * activation.
  */
 final class OverrideRepositorySubjectTest extends SubscriptionsTestCase
 {

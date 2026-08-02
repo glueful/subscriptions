@@ -15,10 +15,11 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 
 /**
- * Drives migration 006 explicitly against 1.x-shaped fixtures on the SHARED
- * (001-005) harness. 006 is deliberately NOT added to SubscriptionsTestCase
- * (Task 9's coordinated activation boundary) -- every test here constructs
- * SubjectModel itself and calls up()/down() directly.
+ * Drives migration 006 explicitly against 1.x-shaped (001-005) fixtures via
+ * LegacySchemaTestCase -- the one harness that stays pre-006 for exactly this
+ * purpose. The shared SubscriptionsTestCase already includes 006 as part of
+ * the shipped 2.0 schema, so every test here constructs SubjectModel itself
+ * and calls up()/down() directly instead of relying on the shared setup.
  */
 final class SubjectMigrationTest extends LegacySchemaTestCase
 {

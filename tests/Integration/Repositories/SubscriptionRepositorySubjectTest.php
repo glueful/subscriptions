@@ -9,10 +9,10 @@ use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
- * Task 6: subject-aware finder/updater added ALONGSIDE the byte-compatible
- * findByTenant()/updateByTenant() (Task 9 switches those to Subject::tenant
- * delegates at the coordinated activation boundary). Runs on the isolated
- * v2 harness (006 applied) so subject_type/subject_uuid are real columns.
+ * Subject-aware finder/updater added alongside the byte-compatible
+ * findByTenant()/updateByTenant(), which are now Subject::tenant delegates
+ * of these since the coordinated activation. Runs on the shared 2.0 harness
+ * (006 applied) so subject_type/subject_uuid are real columns.
  */
 final class SubscriptionRepositorySubjectTest extends SubscriptionsTestCase
 {

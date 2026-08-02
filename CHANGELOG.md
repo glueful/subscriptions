@@ -2,14 +2,168 @@
 
 All notable changes to `glueful/subscriptions` are documented here.
 
-## Unreleased
+## 2.0.0 -- 2026-08-02
 
-Provider wiring for the 2.0 subject model (schema, catalog, and lifecycle
-changes land across the rest of this release; see the forthcoming 2.0.0
-entry for the full breaking-changes list).
+Subscriptions 2.0 generalizes the workspace-only 1.x lifecycle engine to two
+coexisting, never-crossing products: **workspace subscriptions** (unchanged
+tenant billing) and **user memberships** (a user's paid relationship to a
+single workspace). See the design spec
+(`docs/superpowers/specs/2026-08-02-subscriptions-v2-subject-model-design.md`)
+for the full rationale.
+
+### Breaking changes
+
+- **Subject-model schema (migration `006_SubjectModel.php`).** `subscriptions`,
+  `subscription_overrides`, and `subscription_events` each gain
+  `subject_type`/`subject_uuid`, backfilled to `('tenant', tenant_uuid)` for
+  every existing row. `subscriptions.plan_uuid` becomes a **NOT NULL**
+  reference to `subscription_plans.uuid` in the same migration -- a row whose
+  `plan_key` cannot be resolved aborts the migration rather than admitting a
+  partially upgraded catalog. `UNIQUE(tenant_uuid)` is replaced by
+  `UNIQUE(tenant_uuid, subject_type, subject_uuid)` (one subscription row per
+  subject); `subscription_overrides`' unique becomes
+  `UNIQUE(tenant_uuid, subject_type, subject_uuid, entitlement)`. A new
+  `subscription_provider_event_receipts` table becomes the first claim
+  authority for inbound provider events (see "Projector rejection semantics"
+  below); every pre-2.0 provider lifecycle event is backfilled into an
+  `accepted` receipt during `006` so a post-upgrade replay of a pre-2.0 event
+  loses at the new claim authority instead of the legacy event-table backstop.
+  A populated `subscriptions` table requires exactly one 1.4.0 preparation
+  marker before `006` makes its first schema change; missing or duplicate
+  state throws before any DDL runs.
+- **DB-authoritative plan catalog -- config plans are seeds only.**
+  `config('subscriptions.plans')` is no longer overlaid onto the database at
+  resolve time; the database is the single authority for `PlanCatalog`. A new
+  config plan added after upgrading to 2.0 has **no effect** until it is
+  imported: run `subscriptions:plans:import-config` (create-missing, safe to
+  re-run). There is no boot-time or request-time auto-import.
+- **Scoped plan keys + immutable `plan_key` + `plan_uuid` references.**
+  `subscription_plans` drops `UNIQUE(plan_key)` for
+  `UNIQUE(audience, owner_tenant_uuid, plan_key)`, so a workspace's member
+  plan named `pro` no longer collides with the platform `pro`. Subscriptions
+  now reference plans by immutable `plan_uuid`; `plan_key` on the subscription
+  row is a denormalized, immutable display/compat column refreshed on plan
+  change, not a live foreign key. Any future plan-key rename is a separately
+  designed operation -- an ordinary patch cannot do it.
+- **Projector rejection semantics -- five outcomes, four committed + one
+  retryable.** Every inbound provider event is claimed as a `pending` receipt
+  before resolution. Four deterministic validation failures --
+  `missing_subject`, `invalid_subject`, `plan_scope_mismatch`, and
+  `subject_mismatch` -- commit a `rejected` receipt and write no lifecycle
+  event; redelivering the identical event will not help. The fifth outcome,
+  `UnmappedProviderSubscriptionException` (no local row yet, or a relink
+  conflict), rolls back the **entire** transaction including the just-claimed
+  receipt and is retryable once the local side catches up. **Webhook
+  endpoints MUST let `UnmappedProviderSubscriptionException` propagate as a
+  retry-inducing response** (5xx or your provider's redelivery trigger) --
+  catching it and returning 2xx silently discards the event. See
+  `docs/BRING_YOUR_OWN_PROVIDER.md` §6 for the full outcome table.
+- **`subscription_events.data` is now sanitized.** All provider-sourced event
+  data is normalized through `ProviderEventData::sanitize()` before storage,
+  including **historical rows**, which migration `006` rewrites in place via
+  `SubjectModel::sanitizeHistoricalProviderEventData()`. Code or tooling that
+  read raw, unsanitized `data` payloads from `subscription_events` will see
+  the sanitized shape after upgrading.
+- **Stricter subject validation on read paths.** `SubscriptionService::current('')`
+  and the other `...For()`/tenant-facade calls now throw
+  `InvalidArgumentException('invalid subject')` on an empty or incoherent
+  subject identity, where 1.x silently returned `null`. Callers that relied on
+  a `null` result for a blank/invalid tenant UUID must catch the exception (or
+  validate the UUID before calling).
+
+### Upgrade instructions
+
+1.x installations cannot migrate directly to 2.0 -- migrations receive only a
+schema builder, not the application context needed to read the effective plan
+config. Upgrade through the 1.4.0 bridge:
+
+1. Put subscription writes into a maintenance window.
+2. Install and run the final 1.x release, then the preparation command:
+   ```bash
+   composer require "glueful/subscriptions:^1.4"
+   php glueful migrate:run
+   php glueful subscriptions:prepare-v2
+   ```
+   This idempotent command imports configuration plans into the database,
+   synthesizes archived empty-entitlement plans for any dangling subscription
+   keys, and writes the preparation marker required by migration `006`. It
+   fails safely (no writes) if any subscription cannot be resolved and can be
+   re-run after fixing the underlying data.
+3. Install 2.0 and migrate:
+   ```bash
+   composer require "glueful/subscriptions:^2.0"
+   php glueful migrate:run
+   ```
+4. End the maintenance window. Every 1.x call (`current()`, `start()`,
+   `changePlan()`, `cancel()`, `reconcile()`) is preserved as a facade over the
+   new subject-aware core with unchanged signatures and behavior, and the
+   default `SubjectResolverInterface` rejects every `user` subject, so 2.0
+   alone changes nothing about existing tenant-facing behavior.
+5. (Optional) Enable workspace memberships by binding your own
+   `SubjectResolverInterface` that can vouch for real users -- **binding the
+   resolver is the enablement switch**; there is no config flag. See
+   [Enabling memberships](README.md#enabling-memberships).
+
+Full details in [Upgrading to 2.0](README.md#upgrading-to-20).
 
 ### Added
 
+- **Subject model.** A `Subject` value object
+  (`Subject::tenant($tenantUuid)` / `Subject::user($tenantUuid, $userUuid)`)
+  and `SubjectResolverInterface` (`currentTenant`/`currentUser`/`validate`)
+  are the only place host identity knowledge enters the engine. The shipped
+  `DefaultSubjectResolver` preserves 1.x tenant-self-subject behavior and
+  rejects every `user` subject until a host binds its own resolver.
+- **User memberships via resolver binding.** `SubscriptionService` gains a
+  subject-aware core (`currentFor`/`startFor`/`changePlanFor`/`cancelFor`/
+  `reconcileFor`) alongside the preserved 1.x tenant facade. `PlanManagementService`
+  and `PlanPayloadValidator` become scope-aware
+  (`audience`/`owner_tenant_uuid`) and enforce subject/plan-audience matching
+  on every write.
+- **Member entitlement resolution + middleware.** `MemberEntitlementResolver`
+  resolves a user's membership in a workspace plus user-subject overrides,
+  entirely separate from the unchanged tenant `EntitlementResolver`/
+  `DefaultEntitlementChecker`. New `RequireMemberEntitlement` middleware
+  (alias `require_member_entitlement`) resolves the current workspace and
+  user via the subject resolver and fails closed (403) when either is
+  missing, subject to the existing `permissive_middleware` escape hatch
+  (which now governs both middlewares). `rate.tier.*` entitlements are
+  stripped from member resolution -- rate tiers stay tenant-only.
+- **Provider-event receipts.** `subscription_provider_event_receipts` records
+  every inbound provider event -- candidate and resolved identity, outcome,
+  and an allowlisted rejection code -- as a durable audit trail independent
+  of the validated `subscription_events` lifecycle table.
+  `ProviderEventReceiptRepository` is registered shared/autowired.
+- **Subject data purger.** `SubscriptionSubjectDataPurger::purgeSubject(Subject $subject)`
+  is a host-neutral purge primitive: a user-subject purge removes that user's
+  subscription, overrides, events, and receipts (matched by resolved or
+  candidate triple) while leaving the workspace's plans intact; a
+  tenant-subject purge removes an entire workspace's subject rows plus its
+  `audience='user'` plans, never touching platform plans. Both forms are
+  idempotent and transactionally ordered. No purge runs automatically.
+- **Tenant-table registration.** When the optional contracts package and a
+  `TenantTableRegistry` binding are present, the provider registers
+  `subscriptions`, `subscription_overrides`, and `subscription_events` for
+  tenant query enforcement. `subscription_plans` and the provider-event
+  receipts table are deliberately not registered (mixed platform/workspace
+  ownership; candidates may have no valid tenant). Subject-scoped service
+  work runs through `TenantContextRunner::runAsTenant(...)` when available;
+  trusted provider projection, preparation, and purge operations that must
+  discover or remove rows before a tenant context is known run through
+  `runAsSystem(...)`.
+- **Console subject/scope options.** `subscriptions:show`, `subscriptions:set-plan`,
+  and `subscriptions:reconcile` gain `--subject-type`/`--subject-uuid` options
+  for operating on memberships (tenant-oriented signatures and defaults
+  unchanged). `subscriptions:plans:*` commands gain `--audience`/`--owner`,
+  defaulting to the platform scope. New `subscriptions:plans:import-config`
+  command performs the create-missing config import for fresh installs and
+  later config-plan additions.
+- **PostgreSQL CI.** `.github/workflows/ci.yml` provisions a PostgreSQL 16
+  service and runs the full suite against it, with `--fail-on-skipped` on the
+  savepoint proof so the job fails outright if the PostgreSQL-specific
+  concurrency test (`PostgresSavepointTest`) is ever silently skipped instead
+  of actually exercising the poisoned-transaction path
+  `SubscriptionService::startFor()`'s savepoint isolation exists to prevent.
 - `SubscriptionsServiceProvider::services()` registers `MemberEntitlementResolver`
   (non-shared factory -- its ctor-injected `PlanCatalog` is scoped to exactly
   one workspace, so a cached singleton would leak one tenant's entitlement

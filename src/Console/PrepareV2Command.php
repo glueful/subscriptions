@@ -31,6 +31,13 @@ use Symfony\Component\Console\Output\OutputInterface;
  * exist yet. The import below is the frozen 1.x create-missing behavior
  * (`importConfig(force: false, status: 'active')`) expressed against the 1.x
  * schema, where `plan_key` is still globally unique.
+ *
+ * NO PLAN_CHANGED AUDIT. Plans imported or synthesized here do not emit the
+ * `plan_changed` audit event that PlanManagementService's mutating paths emit
+ * -- this command runs outside that service, against the pre-006 schema, with
+ * no subject to attribute the change to. The marker row's `report` JSON
+ * (imported/synthesized keys, verified count) is the authoritative record of
+ * what this run did instead.
  */
 #[AsCommand(
     name: 'subscriptions:prepare-v2',
