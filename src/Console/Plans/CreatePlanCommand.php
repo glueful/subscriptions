@@ -24,6 +24,18 @@ final class CreatePlanCommand extends BaseCommand
         $this->addOption('sort-order', null, InputOption::VALUE_REQUIRED, 'Sort order', '0');
         $this->addOption('entitlements', null, InputOption::VALUE_REQUIRED, 'Entitlements JSON object');
         $this->addOption('entitlements-file', null, InputOption::VALUE_REQUIRED, 'Path to entitlements JSON file');
+        $this->addOption(
+            'audience',
+            null,
+            InputOption::VALUE_REQUIRED,
+            "Plan audience (tenant|user); defaults to the platform scope ('tenant')"
+        );
+        $this->addOption(
+            'owner',
+            null,
+            InputOption::VALUE_REQUIRED,
+            'Owner tenant UUID for workspace-owned plans (audience=user); defaults to the platform scope (empty)'
+        );
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -39,7 +51,12 @@ final class CreatePlanCommand extends BaseCommand
                 'entitlements' => $this->entitlements($input),
             ];
 
-            $plan = $this->plans()->create($payload);
+            $audience = $this->nullableStringOption($input, 'audience');
+            $owner = $this->nullableStringOption($input, 'owner');
+
+            $plan = ($audience === null && $owner === null)
+                ? $this->plans()->create($payload)
+                : $this->plans()->createInScope($audience ?? 'tenant', $owner ?? '', $payload);
             $this->info("Created plan '{$plan['plan_key']}'.");
 
             return self::SUCCESS;

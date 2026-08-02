@@ -120,6 +120,29 @@ final class SubscriptionPlanRepository
         return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
     }
 
+    /**
+     * Scope-aware sibling of updateByKey() (Task 8): since migration 006 drops the
+     * global `plan_key` uniqueness in favor of `(audience, owner_tenant_uuid,
+     * plan_key)`, an unscoped `WHERE plan_key = ?` update could silently hit a
+     * same-keyed row in a different scope. PlanManagementService::*InScope() uses
+     * this instead of updateByKey() for every scoped write.
+     *
+     * @param array<string,mixed> $changes
+     */
+    public function updateByKeyInScope(
+        ApplicationContext $context,
+        string $audience,
+        string $owner,
+        string $key,
+        array $changes
+    ): void {
+        db($context)->table('subscription_plans')
+            ->where('audience', '=', $audience)
+            ->where('owner_tenant_uuid', '=', $owner)
+            ->where('plan_key', '=', $key)
+            ->update($this->encodeRow($changes));
+    }
+
     /** @param array<string,mixed> $row */
     public function insert(ApplicationContext $context, array $row): void
     {

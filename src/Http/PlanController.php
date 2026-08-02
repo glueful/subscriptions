@@ -13,6 +13,15 @@ use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Routing\Attributes\QueryParam;
 use Symfony\Component\HttpFoundation\Request;
 
+/**
+ * Deliberately pinned to the platform scope ('tenant', '') only (Task 8): every
+ * action below calls the unscoped 1.x PlanManagementService methods and accepts
+ * no audience/owner input, so no HTTP request can target a workspace scope.
+ * Workspace membership plans (`audience='user'`) are managed via
+ * PlanManagementService::*InScope() by host-integrated surfaces, not this
+ * controller (spec §3 "Administrative authority"). See PlanManagementService's
+ * own TRANSITIONAL note for what Task 9's coordinated cutover changes here.
+ */
 final class PlanController extends BaseController
 {
     public function __construct(

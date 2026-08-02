@@ -24,6 +24,18 @@ final class UpdatePlanCommand extends BaseCommand
         $this->addOption('sort-order', null, InputOption::VALUE_REQUIRED, 'Sort order');
         $this->addOption('entitlements', null, InputOption::VALUE_REQUIRED, 'Entitlements JSON object');
         $this->addOption('entitlements-file', null, InputOption::VALUE_REQUIRED, 'Path to entitlements JSON file');
+        $this->addOption(
+            'audience',
+            null,
+            InputOption::VALUE_REQUIRED,
+            "Plan audience (tenant|user); defaults to the platform scope ('tenant')"
+        );
+        $this->addOption(
+            'owner',
+            null,
+            InputOption::VALUE_REQUIRED,
+            'Owner tenant UUID for workspace-owned plans (audience=user); defaults to the platform scope (empty)'
+        );
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -58,7 +70,12 @@ final class UpdatePlanCommand extends BaseCommand
                 $payload['entitlements'] = $this->entitlements($input);
             }
 
-            $plan = $this->plans()->update($key, $payload);
+            $audience = $this->nullableStringOption($input, 'audience');
+            $owner = $this->nullableStringOption($input, 'owner');
+
+            $plan = ($audience === null && $owner === null)
+                ? $this->plans()->update($key, $payload)
+                : $this->plans()->updateInScope($audience ?? 'tenant', $owner ?? '', $key, $payload);
             $this->info("Updated plan '{$plan['plan_key']}'.");
 
             return self::SUCCESS;
