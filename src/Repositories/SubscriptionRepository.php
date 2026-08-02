@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Repositories;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Subscriptions\Subject;
 
 final class SubscriptionRepository
 {
@@ -13,6 +14,24 @@ final class SubscriptionRepository
     {
         return db($context)->table('subscriptions')
             ->where('tenant_uuid', '=', $tenantUuid)
+            ->limit(1)
+            ->first();
+    }
+
+    /**
+     * Subject-aware finder (Task 6): triple match on (tenant_uuid, subject_type,
+     * subject_uuid). Added alongside the byte-compatible findByTenant() above --
+     * Task 9 switches findByTenant() to a Subject::tenant() delegate at the
+     * coordinated activation boundary.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findBySubject(ApplicationContext $context, Subject $subject): ?array
+    {
+        return db($context)->table('subscriptions')
+            ->where('tenant_uuid', '=', $subject->tenantUuid)
+            ->where('subject_type', '=', $subject->type)
+            ->where('subject_uuid', '=', $subject->uuid)
             ->limit(1)
             ->first();
     }
@@ -43,6 +62,24 @@ final class SubscriptionRepository
 
         db($context)->table('subscriptions')
             ->where('tenant_uuid', '=', $tenantUuid)
+            ->update($this->normalizeJson($changes));
+    }
+
+    /**
+     * Subject-aware updater (Task 6): triple match, added alongside the
+     * byte-compatible updateByTenant() above -- Task 9 switches updateByTenant() to a
+     * Subject::tenant() delegate at the coordinated activation boundary.
+     *
+     * @param array<string,mixed> $changes
+     */
+    public function updateBySubject(ApplicationContext $context, Subject $subject, array $changes): void
+    {
+        $changes['updated_at'] = $this->now($context);
+
+        db($context)->table('subscriptions')
+            ->where('tenant_uuid', '=', $subject->tenantUuid)
+            ->where('subject_type', '=', $subject->type)
+            ->where('subject_uuid', '=', $subject->uuid)
             ->update($this->normalizeJson($changes));
     }
 

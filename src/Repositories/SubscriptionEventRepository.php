@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Repositories;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Subscriptions\SubjectType;
 use Glueful\Helpers\Utils;
 
 /**
@@ -13,15 +14,97 @@ use Glueful\Helpers\Utils;
  */
 class SubscriptionEventRepository
 {
-    /** @param array<string,mixed> $event */
+    private ?bool $eventsTableHasSubjectColumns = null;
+
+    /**
+     * @param array<string,mixed> $event
+     * @throws \InvalidArgumentException when the event's subject identity is incoherent
+     *         (repository-boundary coherence check only -- host existence remains
+     *         SubjectResolverInterface's job, spec §8).
+     */
     public function insertOrThrow(ApplicationContext $context, array $event): void
     {
         $row = array_merge(['uuid' => Utils::generateNanoID(12)], $event);
+
+        // Legacy-compat (Task 6, until Task 9's coordinated cutover): the 1.x call sites
+        // (SubscriptionService, SubscriptionEventProjector) and pre-v2 event fixtures
+        // insert tenant-only events that carry NO subject_type/subject_uuid key at all --
+        // an absent (or explicitly null) key is read as "caller has no concept of
+        // subjects yet" and gets a derived coherent tenant self-subject. An explicitly
+        // passed EMPTY STRING is a real (malformed) value and is left alone so the
+        // coherence check below rejects it -- it is not silently repaired.
+        if (!array_key_exists('subject_type', $row) || $row['subject_type'] === null) {
+            $row['subject_type'] = SubjectType::TENANT;
+        }
+        if (!array_key_exists('subject_uuid', $row) || $row['subject_uuid'] === null) {
+            $row['subject_uuid'] = $row['tenant_uuid'] ?? '';
+        }
+
+        $this->assertCoherentIdentity($row);
+
+        // The subject_type/subject_uuid columns only exist once migration 006 has run
+        // (the shared 1.x harness never applies it -- SubscriptionsTestCase stays on the
+        // pre-006 schema by design). On that schema the derived/explicit subject values
+        // above exist purely to satisfy the coherence check and must NOT be written --
+        // the columns don't exist and the insert would fail with "no such column".
+        if (!$this->eventsTableHasSubjectColumns($context)) {
+            unset($row['subject_type'], $row['subject_uuid']);
+        }
+
         if (isset($row['data']) && is_array($row['data'])) {
             $row['data'] = json_encode($row['data'], JSON_THROW_ON_ERROR);
         }
 
         db($context)->table('subscription_events')->insert($row);
+    }
+
+    private function eventsTableHasSubjectColumns(ApplicationContext $context): bool
+    {
+        if ($this->eventsTableHasSubjectColumns === null) {
+            $this->eventsTableHasSubjectColumns = db($context)->getSchemaBuilder()
+                ->hasColumn('subscription_events', 'subject_type');
+        }
+
+        return $this->eventsTableHasSubjectColumns;
+    }
+
+    /**
+     * Coherence-only validation of the static subject identity (spec §8): non-empty
+     * tenant_uuid/subject_type/subject_uuid; subject_type exactly tenant|user; a tenant
+     * subject requires subject_uuid === tenant_uuid. Does NOT check that the tenant or
+     * subject actually exists -- that remains SubjectResolverInterface's job.
+     *
+     * @param array<string,mixed> $row
+     */
+    private function assertCoherentIdentity(array $row): void
+    {
+        $tenantUuid = (string) ($row['tenant_uuid'] ?? '');
+        $subjectType = (string) ($row['subject_type'] ?? '');
+        $subjectUuid = (string) ($row['subject_uuid'] ?? '');
+
+        if ($tenantUuid === '') {
+            throw new \InvalidArgumentException(
+                'subscription event requires a non-empty tenant_uuid.'
+            );
+        }
+
+        if ($subjectType !== SubjectType::TENANT && $subjectType !== SubjectType::USER) {
+            throw new \InvalidArgumentException(
+                "subscription event subject_type must be 'tenant' or 'user', got '{$subjectType}'."
+            );
+        }
+
+        if ($subjectUuid === '') {
+            throw new \InvalidArgumentException(
+                'subscription event requires a non-empty subject_uuid.'
+            );
+        }
+
+        if ($subjectType === SubjectType::TENANT && $subjectUuid !== $tenantUuid) {
+            throw new \InvalidArgumentException(
+                'subscription event with subject_type=tenant requires subject_uuid === tenant_uuid.'
+            );
+        }
     }
 
     /** @param array<string,mixed> $event */
@@ -48,29 +131,13 @@ class SubscriptionEventRepository
     }
 
     /**
-     * Cross-driver unique-violation detection: SQLSTATE 23000 (MySQL/SQLite) or
-     * 23505 (Postgres) via getCode(), or a "unique" message substring -- checked
-     * down the previous-exception chain in case a caller wrapped the PDO error.
-     * Public because the listener branches on it around its claim transaction.
+     * Cross-driver unique-violation detection, delegated to the shared
+     * UniqueViolations helper (spec §8) so ProviderEventReceiptRepository reuses the
+     * exact same detection logic. Public because the listener branches on it around
+     * its claim transaction.
      */
     public function isUniqueViolation(\Throwable $e): bool
     {
-        for ($current = $e; $current !== null; $current = $current->getPrevious()) {
-            $code = (string) $current->getCode();
-            if ($code === '23000' || $code === '23505') {
-                return true;
-            }
-
-            $message = strtolower($current->getMessage());
-            if (
-                str_contains($message, 'unique')
-                || str_contains($message, '23000')
-                || str_contains($message, '23505')
-            ) {
-                return true;
-            }
-        }
-
-        return false;
+        return UniqueViolations::isUniqueViolation($e);
     }
 }

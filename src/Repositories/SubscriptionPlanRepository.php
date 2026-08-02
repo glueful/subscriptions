@@ -42,6 +42,84 @@ final class SubscriptionPlanRepository
         );
     }
 
+    /**
+     * Scope-aware finder (Task 6): every 1.x finder above gains a scope-aware sibling,
+     * added ALONGSIDE the byte-compatible 1.x names (which remain untouched through
+     * Task 8; Task 9 switches them to the platform scope ('tenant', '')).
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByUuid(ApplicationContext $context, string $uuid): ?array
+    {
+        $row = db($context)->table('subscription_plans')
+            ->where('uuid', '=', $uuid)
+            ->limit(1)
+            ->first();
+
+        return $row !== null ? $this->decodeRow($row) : null;
+    }
+
+    /** @return array<string,mixed>|null */
+    public function findByKeyInScope(
+        ApplicationContext $context,
+        string $audience,
+        string $owner,
+        string $key
+    ): ?array {
+        $row = db($context)->table('subscription_plans')
+            ->where('audience', '=', $audience)
+            ->where('owner_tenant_uuid', '=', $owner)
+            ->where('plan_key', '=', $key)
+            ->limit(1)
+            ->first();
+
+        return $row !== null ? $this->decodeRow($row) : null;
+    }
+
+    /** @return array<string,mixed>|null */
+    public function findResolvableByKeyInScope(
+        ApplicationContext $context,
+        string $audience,
+        string $owner,
+        string $key
+    ): ?array {
+        $row = db($context)->table('subscription_plans')
+            ->where('audience', '=', $audience)
+            ->where('owner_tenant_uuid', '=', $owner)
+            ->where('plan_key', '=', $key)
+            ->whereIn('status', ['active', 'archived'])
+            ->limit(1)
+            ->first();
+
+        return $row !== null ? $this->decodeRow($row) : null;
+    }
+
+    /** @return list<array<string,mixed>> */
+    public function listInScope(ApplicationContext $context, string $audience, string $owner): array
+    {
+        return array_map(
+            fn (array $row): array => $this->decodeRow($row),
+            db($context)->table('subscription_plans')
+                ->where('audience', '=', $audience)
+                ->where('owner_tenant_uuid', '=', $owner)
+                ->orderBy(['sort_order' => 'ASC', 'plan_key' => 'ASC'])
+                ->get()
+        );
+    }
+
+    public function maxUpdatedAtInScope(ApplicationContext $context, string $audience, string $owner): ?string
+    {
+        $row = db($context)->table('subscription_plans')
+            ->where('audience', '=', $audience)
+            ->where('owner_tenant_uuid', '=', $owner)
+            ->selectRaw('MAX(updated_at) AS max_updated_at')
+            ->first();
+
+        $value = $row['max_updated_at'] ?? null;
+
+        return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
+    }
+
     /** @param array<string,mixed> $row */
     public function insert(ApplicationContext $context, array $row): void
     {
