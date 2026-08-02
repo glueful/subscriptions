@@ -18,6 +18,9 @@ This guide shows how to plug in a custom provider:
 4. [The optional reconcile puller](#4-the-optional-reconcile-puller) — feed
    authoritative provider state into `reconcile()`.
 5. [Worked example](#5-worked-example) — a compact end-to-end custom provider.
+6. [Receipts and rejection semantics](#6-receipts-and-rejection-semantics) —
+   the five outcomes, which commit and which roll back, and why your webhook
+   endpoint's retry behavior depends on knowing the difference.
 
 ---
 
@@ -352,7 +355,7 @@ use Glueful\Extensions\Subscriptions\SubscriptionService;
 // Every inbound event is claimed as a `pending` provider-event receipt before
 // projection runs (the receipts table's (gateway, logical_key) unique is the
 // real idempotency gate), then settled to accepted or rejected -- see
-// "Receipts and subject validation" below.
+// "Receipts and rejection semantics" (§6) below.
 $projector = new SubscriptionEventProjector(
     new SubscriptionRepository(),
     new SubscriptionEventRepository(),
@@ -402,3 +405,45 @@ service provider, and let the container autowire the projector and service.
 as a listener for payvia's `PaymentProviderEvent` and binds
 `PayviaProviderStatePuller` to `ProviderStatePullerInterface`. It is the
 zero-glue first-party default; BYOP is only for everything else.
+
+---
+
+## 6. Receipts and rejection semantics
+
+Every inbound provider event is claimed as a `pending` row in
+`subscription_provider_event_receipts` before resolution begins — the
+`(provider_gateway, provider_logical_event_key)` unique index on that table is
+the real idempotency gate (see [§2's `logicalEventKey`
+idempotency](#logicaleventkey-idempotency-receipts-first)). Once claimed,
+`project()` settles into exactly one of five outcomes:
+
+| # | Outcome | Trigger | Receipt `outcome` | Transaction | Retry behavior |
+|---|---|---|---|---|---|
+| 1 | `missing_subject` | A `subscription.created` event's metadata omits `tenant_uuid`, or gives `subject_type` without `subject_uuid` | `rejected` | **commits** | Deterministic — fails identically on every redelivery until the provider sends complete metadata. |
+| 2 | `invalid_subject` | The resolved subject fails `SubjectResolverInterface::validate()` (e.g. any `user` subject under the shipped `DefaultSubjectResolver`, which rejects them all) | `rejected` | **commits** | Deterministic — fails until a host binds a resolver that can vouch for the subject. |
+| 3 | `plan_scope_mismatch` | The target plan's `(audience, owner_tenant_uuid)` does not match the resolved subject's own scope | `rejected` | **commits** | Deterministic — fails until the plan/subject pairing is corrected on your side. |
+| 4 | `subject_mismatch` | A later event's metadata names a subject that disagrees with the row's already-stored triple | `rejected` | **commits** | Deterministic — fails until the provider stops sending the conflicting metadata. |
+| 5 | *(unmapped)* — `UnmappedProviderSubscriptionException` | No row exists yet for `(gateway, gateway_subscription_id)` and no relink recovery applies, **or** a validated tenant subject's relink target is already linked to a different provider subscription | *(none — the whole insert is undone)* | **rolls back entirely, including the just-claimed receipt** | **Retryable** — the local side may simply not exist yet (or a relink conflict may resolve itself); the SAME logical event can succeed once it does. |
+
+Any *other* genuinely transient failure (a database error mid-write, for
+example) behaves exactly like outcome 5: the whole transaction — receipt claim
+included — rolls back, so the provider's retry of the same logical event can
+succeed later.
+
+**The distinction that matters for your integration:**
+
+- Outcomes 1–4 are **diagnosable, permanent-until-fixed** rejections. They
+  commit a receipt row you can query and alert on (`outcome = 'rejected'`,
+  `rejection_code` set to the exact code above); redelivering the identical
+  event will not help, because nothing about the event itself changes between
+  attempts.
+- Outcome 5 is the opposite: nothing durable remembers the delivery happened
+  — the receipt claim was rolled back along with everything else — so **your
+  webhook endpoint MUST let `UnmappedProviderSubscriptionException` propagate
+  as a retry-inducing response** (a 5xx, or whatever your provider's
+  redelivery trigger is). Catching it and still returning 2xx acknowledges the
+  webhook while silently discarding the event.
+
+See [§2's `metadata` and subject
+validation](#metadata-and-subject-validation) for exactly which check produces
+which code.

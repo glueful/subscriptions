@@ -22,6 +22,31 @@ Requires `glueful/framework ^1.55.0`. (The `Glueful\Entitlements` seam and the
 container-precedence fix this extension relies on shipped in 1.54.0; 1.55.0 is
 required as the security-hardened baseline.)
 
+## Two product layers
+
+Since 2.0, this extension models two coexisting products that **never share
+entitlements**. They are separate models, not configuration modes -- there is
+no per-install "subject mode", and both run in the same installation at the
+same time:
+
+| Layer | Subscriber | Catalog | Controls |
+| --- | --- | --- | --- |
+| **Workspace subscription** (1.x's only product) | a tenant/workspace | global platform catalog (`audience='tenant'`) | workspace capabilities, limits, API rate tiers |
+| **User membership** (new in 2.0) | a user *within* one workspace | that workspace's own membership catalog (`audience='user'`) | paywalls, member benefits, recurring content access |
+
+- **Tenant resolver** (unchanged from 1.x): `EntitlementResolver` /
+  `DefaultEntitlementChecker` / the `require_entitlement` middleware.
+- **Member resolver** (new): `MemberEntitlementResolver` / the
+  `require_member_entitlement` middleware -- see
+  [Memberships](#memberships-workspace-scoped-user-subscriptions) below.
+
+A workspace's membership plan entitlements never appear in the tenant
+checker's output, and a tenant's platform-plan entitlements never appear in a
+member's map -- each resolver reads its own scoped catalog and its own
+subject-scoped overrides. Memberships are completely **inert** until a host
+binds a `SubjectResolverInterface` that can vouch for real users; see
+"Enabling memberships" below.
+
 ## The decoupling invariant
 
 This package works fully with **no `glueful/payvia` and no `glueful/tenancy`
@@ -215,7 +240,89 @@ over the default resolver: plans grant boolean `rate.tier.{tier}` entitlement
 flags for the tiers listed in `subscriptions.rate_tiers` (highest-first); the
 first granted tier wins, and `TierManager` config owns the numbers. No tenant
 or no granted flag delegates to the default resolver -- the bridge is inert
-without tenancy.
+without tenancy. Rate tiers are **tenant-only**: a workspace membership plan's
+entitlements never reach this bridge (see Memberships below).
+
+## Memberships (workspace-scoped user subscriptions)
+
+A **membership** is a `user` subject's subscription to a plan owned by ONE
+workspace (`audience='user'`, `owner_tenant_uuid=<that workspace>`) -- see
+[Two product layers](#two-product-layers). It never shares a catalog, a plan,
+or an entitlement map with that workspace's own (`tenant`) subscription.
+
+### Enabling memberships
+
+The shipped `SubjectResolverInterface` default rejects **every** `user`
+subject, so memberships are completely inert out of the box. **Binding your
+own resolver is the enablement switch** -- there is no config flag:
+
+```php
+// In your app's ServiceProvider.
+use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
+
+public static function services(): array
+{
+    return [
+        SubjectResolverInterface::class => [
+            'class' => YourAppSubjectResolver::class,
+            'shared' => true,
+            'autowire' => true,
+        ],
+    ];
+}
+```
+
+Your resolver's `currentUser()` must return the currently authenticated global
+user's uuid (or `null`), and `validate()` must prove a `user` subject's
+`(tenant_uuid, subject_uuid)` pairing is a real, existing membership before any
+write is allowed to proceed (spec §4).
+
+### Resolving a member's entitlements
+
+```php
+use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolver;
+
+$catalog = PlanCatalog::forScope($context, 'user', $tenantUuid); // THIS workspace only
+$resolver = new MemberEntitlementResolver(
+    $catalog,
+    $subscriptionRepository,
+    $overrideRepository,
+    $effectivePlanResolver,
+);
+
+$map = $resolver->resolveMap($context, $tenantUuid, $userUuid);
+```
+
+Unlike the tenant path, a membership has **no implicit default plan**: with no
+subscription row, `resolveMap()` starts from an empty entitlement map (an
+active user-subject override may still grant complimentary access). Any
+`rate.tier.*` key is always stripped from a member map -- rate limiting stays
+tenant-only even if a membership plan's entitlements JSON happens to carry one.
+
+### `require_member_entitlement` middleware
+
+```php
+$router->get('/articles/{id}', [ArticleController::class, 'show'])
+    ->middleware(['require_member_entitlement:content.premium']);
+```
+
+Fails closed (403) when the current workspace or the current user cannot be
+resolved via `SubjectResolverInterface`, unless
+`subscriptions.permissive_middleware` is `true` -- the same flag
+`require_entitlement` uses; since 2.0 it governs **both** middlewares.
+
+### Provider-driven memberships
+
+Every provider subscription that backs a membership MUST carry the complete
+subject in its metadata: `tenant_uuid`, `subject_type`, `subject_uuid`, and
+`plan_uuid`. The projector requires and validates the full triple on
+`subscription.created` and rejects an incomplete or invalid one into a
+provider-event receipt rather than silently mapping it to the wrong subject.
+See
+[docs/BRING_YOUR_OWN_PROVIDER.md](docs/BRING_YOUR_OWN_PROVIDER.md#metadata-and-subject-validation)
+for the full contract, including which rejection codes commit and which
+outcomes are retryable.
 
 ## Consumes Payvia (when installed)
 
@@ -249,12 +356,29 @@ Provider-event projection maps:
 | `payment.succeeded`    | if `trialing`/`past_due` -> `active`, clear grace     |
 | `invoice.paid`          | same settle path                                      |
 
-Idempotency is claim-first: the `subscription_events` insert (unique per
-`(provider_gateway, provider_logical_event_key)`) and the projection run in one
-transaction, so a duplicate or concurrent delivery rolls back and never
-re-projects -- grace can never be extended twice. The tenant mapping is
+Idempotency is claim-first: a `pending` row in
+`subscription_provider_event_receipts` (unique per `(provider_gateway,
+provider_logical_event_key)`) is claimed FIRST, then the projection runs in the
+SAME transaction, so a duplicate or concurrent delivery rolls back and never
+re-projects -- grace can never be extended twice. The subscription mapping is
 `(gateway, gateway_subscription_id)`; on `subscription.created` an unlinked row
-can be recovered via provider metadata `tenant_uuid`.
+can be recovered via provider metadata (see [Provider-driven
+memberships](#provider-driven-memberships) above for the full
+`tenant_uuid`/`subject_type`/`subject_uuid`/`plan_uuid` metadata contract).
+
+> **Webhook endpoints MUST treat an uncaught `UnmappedProviderSubscriptionException`
+> as a signal to retry.** It means the local side may simply not exist yet (the
+> checkout hasn't completed, or the membership row hasn't landed), so the
+> WHOLE projection attempt -- including the just-claimed receipt -- is rolled
+> back on purpose, and the SAME logical event must be redelivered later to
+> succeed. Let it surface as a 5xx (or whatever your provider treats as
+> "redeliver this event"); catching it and still returning 2xx silently
+> discards the event, since nothing durable remembers the delivery happened.
+> Every OTHER deterministic rejection (`missing_subject`, `invalid_subject`,
+> `plan_scope_mismatch`, `subject_mismatch`) instead commits a `rejected`
+> receipt and will fail identically on every retry -- see
+> [docs/BRING_YOUR_OWN_PROVIDER.md](docs/BRING_YOUR_OWN_PROVIDER.md#receipts-and-rejection-semantics)
+> for the complete table.
 
 ## Managed plan API
 
@@ -355,3 +479,12 @@ and provider-event receipt management. 1.4.0 is additive with no behavior change
 The preparation marker protects 2.0 migration `006` from running without first
 validating that all subscriptions can be resolved. No subscriptions are modified
 by 1.4.0; all existing behavior is preserved until 2.0 migration completes.
+
+4. (Optional) Enable memberships. 2.0 alone changes **nothing** about your
+   existing tenant-facing behavior -- every 1.x call (`SubscriptionService::start()`,
+   `current()`, `changePlan()`, ...) is preserved byte-for-byte as a facade over
+   the new subject-aware core, and the default `SubjectResolverInterface`
+   rejects every `user` subject. If you want the new workspace-membership
+   product, bind your own `SubjectResolverInterface` (see
+   [Enabling memberships](#enabling-memberships)) -- **binding the resolver is
+   the enablement switch**; there is no config flag to flip.

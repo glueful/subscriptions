@@ -4,6 +4,38 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## Unreleased
 
+Provider wiring for the 2.0 subject model (schema, catalog, and lifecycle
+changes land across the rest of this release; see the forthcoming 2.0.0
+entry for the full breaking-changes list).
+
+### Added
+
+- `SubscriptionsServiceProvider::services()` registers `MemberEntitlementResolver`
+  (non-shared factory -- its ctor-injected `PlanCatalog` is scoped to exactly
+  one workspace, so a cached singleton would leak one tenant's entitlement
+  scope into another's request), `ProviderEventReceiptRepository` and
+  `SubscriptionSubjectDataPurger` (shared, autowired), and `RequireMemberEntitlement`
+  under the new `require_member_entitlement` middleware alias.
+  `SubjectResolverInterface` remains bound to `DefaultSubjectResolver`, shared
+  and host-overridable -- binding a host resolver that can vouch for real users
+  is what enables workspace memberships; there is no config flag for it.
+
+### Documentation
+
+- README: the two-layer product model (workspace subscriptions vs. user
+  memberships, which never share a catalog or an entitlement map), the
+  "Memberships" section (enabling the resolver, resolving member entitlements,
+  the `require_member_entitlement` middleware, the provider metadata contract
+  `tenant_uuid`/`subject_type`/`subject_uuid`/`plan_uuid`), and the retryable
+  `UnmappedProviderSubscriptionException` webhook contract.
+- `docs/BRING_YOUR_OWN_PROVIDER.md`: a new "Receipts and rejection semantics"
+  section tabulating all five provider-event outcomes and which commit a
+  `rejected` receipt versus which roll back the whole claim for a provider
+  retry.
+- `config/subscriptions.php`: comments only, no key changes -- documents that
+  `plans` are seed-only (no runtime overlay), `rate_tiers` is tenant-only, and
+  `permissive_middleware` now governs both route middlewares.
+
 ## 1.4.0 -- 2026-08-02
 
 ### Added

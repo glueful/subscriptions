@@ -17,7 +17,9 @@ use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
+use Glueful\Extensions\Subscriptions\Http\RequireMemberEntitlement;
 use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
+use Glueful\Extensions\Subscriptions\Lifecycle\SubscriptionSubjectDataPurger;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
@@ -30,6 +32,8 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
+use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolver;
+use Glueful\Extensions\Subscriptions\SubjectType;
 use Psr\Container\ContainerInterface;
 
 final class SubscriptionsServiceProvider extends ServiceProvider
@@ -54,9 +58,10 @@ final class SubscriptionsServiceProvider extends ServiceProvider
      * core's allow-all NullEntitlementChecker, and TierResolverInterface over the
      * default TierResolver (which EntitlementTierResolver wraps and delegates to).
      *
-     * The `require_entitlement` middleware alias is declared here -- the router
-     * resolves string middleware names through the container, which compiles
-     * before boot(), so boot() would be too late (mirrors tenancy's `tenant`).
+     * The `require_entitlement` and `require_member_entitlement` middleware
+     * aliases are declared here -- the router resolves string middleware names
+     * through the container, which compiles before boot(), so boot() would be
+     * too late (mirrors tenancy's `tenant`).
      *
      * @return array<string, mixed>
      */
@@ -146,18 +151,56 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'autowire' => true,
                 'alias' => ['subscriptions_plans_manage'],
             ],
+            // Task 14 -- spec §5/§11: the workspace-MEMBER middleware. Deliberately
+            // NOT shared: its own constructor injects MemberEntitlementResolver,
+            // so it inherits that service's per-tenant-scope restriction below.
+            RequireMemberEntitlement::class => [
+                'class' => RequireMemberEntitlement::class,
+                'shared' => false,
+                'autowire' => true,
+                'alias' => ['require_member_entitlement'],
+            ],
             PlanController::class => [
                 'class' => PlanController::class,
                 'shared' => true,
                 'autowire' => true,
             ],
-            // Explicit factory (Task 10): ProviderEventReceiptRepository has no
-            // constructor dependencies but is NOT (yet) registered as a standalone
-            // service -- that's Task 14's job. Constructing it directly here keeps
-            // the projector's own definition self-contained until then.
+            // ProviderEventReceiptRepository has no constructor dependencies and
+            // carries no per-request state, so it is an ordinary shared, autowired
+            // service (Task 14) -- makeSubscriptionEventProjector() below now
+            // resolves it from the container instead of constructing it directly.
+            ProviderEventReceiptRepository::class => [
+                'class' => ProviderEventReceiptRepository::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
             SubscriptionEventProjectorInterface::class => [
                 'factory' => [self::class, 'makeSubscriptionEventProjector'],
                 'shared' => true,
+            ],
+            // Task 14 -- spec §5/§11.6, Task 11's contract: this factory resolves
+            // the CURRENT workspace via SubjectResolverInterface and builds a
+            // PlanCatalog scoped to it (PlanCatalog::forScope($context, 'user',
+            // $tenantUuid)), because a workspace membership catalog is inherently
+            // tenant-specific (unlike the single global platform catalog). The
+            // resolver's own assertCatalogScopeMatches() guard throws if that
+            // scope is ever mismatched against the tenant resolveMap() is called
+            // with, so this MUST be a non-shared ('shared' => false) definition:
+            // a cached singleton would freeze the workspace scope to whichever
+            // tenant happened to be current the first time the container built
+            // it, then throw (or worse, silently leak entitlements -- see Task
+            // 11's fix round) for every OTHER workspace's request afterward.
+            MemberEntitlementResolver::class => [
+                'factory' => [self::class, 'makeMemberEntitlementResolver'],
+                'shared' => false,
+            ],
+            // Task 14 -- spec §9: host-neutral subject/tenant data purge. No
+            // per-request state (ApplicationContext is autowired per resolution
+            // like every other consumer here); hosts decide when to invoke it.
+            SubscriptionSubjectDataPurger::class => [
+                'class' => SubscriptionSubjectDataPurger::class,
+                'shared' => true,
+                'autowire' => true,
             ],
             // Registered as a service so the '@serviceId' lazy listener resolves.
             PayviaSubscriptionEventBridge::class => [
@@ -216,10 +259,37 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         return new SubscriptionEventProjector(
             $c->get(SubscriptionRepository::class),
             $c->get(SubscriptionEventRepository::class),
-            new ProviderEventReceiptRepository(),
+            $c->get(ProviderEventReceiptRepository::class),
             $c->get(PlanCatalog::class),
             $c->get(ApplicationContext::class),
             $c->get(SubjectResolverInterface::class),
+        );
+    }
+
+    /**
+     * Task 14 -- spec §5/§11.6: builds a MemberEntitlementResolver whose catalog
+     * is scoped to the CURRENT workspace, resolved fresh via
+     * SubjectResolverInterface on every call (this factory is registered
+     * non-shared -- see the docblock on its `services()` entry). A missing
+     * current tenant (no host tenancy binding, or an unauthenticated request)
+     * falls back to an empty owner scope; RequireMemberEntitlement's own
+     * currentTenant() check fails closed (403) before ever calling
+     * resolveMap() in that case, so the mismatched scope is never actually used.
+     */
+    public static function makeMemberEntitlementResolver(ContainerInterface $c): MemberEntitlementResolver
+    {
+        $context = $c->get(ApplicationContext::class);
+        $tenantUuid = (string) ($c->get(SubjectResolverInterface::class)->currentTenant($context) ?? '');
+        $cacheConfig = (array) config($context, 'subscriptions.cache', []);
+
+        return new MemberEntitlementResolver(
+            PlanCatalog::forScope($context, SubjectType::USER, $tenantUuid),
+            $c->get(SubscriptionRepository::class),
+            $c->get(OverrideRepository::class),
+            $c->get(EffectivePlanResolver::class),
+            $c->has(CacheStore::class) ? $c->get(CacheStore::class) : null,
+            (bool) ($cacheConfig['enabled'] ?? true),
+            (int) ($cacheConfig['ttl'] ?? 300),
         );
     }
 
@@ -245,6 +315,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         return [
             'require_entitlement' => RequireEntitlement::class,
             'subscriptions_plans_manage' => RequirePlanManagementPermission::class,
+            'require_member_entitlement' => RequireMemberEntitlement::class,
         ];
     }
 
