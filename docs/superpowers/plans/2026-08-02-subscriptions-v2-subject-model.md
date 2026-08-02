@@ -4,13 +4,13 @@
 
 **Goal:** Ship the 1.4.0 upgrade bridge (preparation migration + `subscriptions:prepare-v2`) and then subscriptions 2.0.0: the explicit `(tenant_uuid, subject_type, subject_uuid)` subject model with immutable `plan_uuid` references, scoped catalogs, host-provided subject validation, provider-event receipts, member entitlement resolution, and tenant-lifecycle mechanics — per `docs/superpowers/specs/2026-08-02-subscriptions-v2-subject-model-design.md`.
 
-**Architecture:** Two release artifacts in strict order. Phase A (1.4.0, Tasks 1–3) is additive: migration `005` creates the preparation-state table and a booted-app command materializes the DB-authoritative platform catalog. Phase B (2.0.0, Tasks 4–16) lands the subject model: migration `006` refuses to run on a populated install without the preparation marker, then adds subject columns/uniques, `plan_uuid NOT NULL`, catalog scope columns, and the receipts table. Services grow a subject-aware core with the 1.x tenant API preserved as a facade.
+**Architecture:** Two release artifacts in strict order. Phase A (1.4.0, Tasks 1–3) is additive: migration `005` creates the preparation-state table and a booted-app command materializes the DB-authoritative platform catalog. Phase B (2.0.0, Tasks 4–16) lands the subject model. Tasks 5–8 build and test the v2 schema and APIs behind an isolated v2 harness while the shared 1.x harness and facades remain operational. Task 9 is the single coordinated activation boundary: it applies migration `006` to the shared harness, seeds DB plans, updates every legacy fixture/write path, removes transitional catalog behavior, and switches the preserved tenant API onto the subject-aware core. No intermediate commit may put the common suite on a schema its production services cannot write.
 
 **Tech Stack:** PHP 8.3, glueful/framework ≥ 1.57 (SchemaBuilderInterface, Connection savepoint transactions, CacheStore), phpunit 10.5 with the existing SQLite in-memory `SubscriptionsTestCase` harness, phpstan, phpcs (PSR-12, 120-col).
 
 ## Global Constraints (from the spec — every task implicitly includes these)
 
-- Subject triple invariants (spec §1): `tenant` subjects have `subject_uuid === tenant_uuid`; `user` subjects are always scoped by both workspace and user; no sentinels in subject identity.
+- Subject triple invariants (spec §1): `tenant` subjects have `subject_uuid === tenant_uuid`; `user` subjects are always scoped by both workspace and user. The default compatibility resolver rejects empty or incoherent identities and all user subjects; a host-bound production resolver additionally rejects that host's sentinel/default identities.
 - `plan_key` is **immutable** on plan rows; subscriptions reference `plan_uuid`; `plan_key` on subscription rows is denormalized display/compat data refreshed on plan change (spec §3).
 - Plan-key uniqueness is `(audience, owner_tenant_uuid, plan_key)`; `owner_tenant_uuid` is `NOT NULL DEFAULT ''` where `''` = platform-owned (spec §2).
 - `audience='tenant'` ⇒ `owner_tenant_uuid=''`; `audience='user'` ⇒ `owner_tenant_uuid≠''` (spec §2).
@@ -39,6 +39,8 @@ src/
   Http/RequireMemberEntitlement.php       (new)
   Console/PrepareV2Command.php            (new, ships in 1.4.0)
   Repositories/ProviderEventReceiptRepository.php (new)
+  Repositories/UniqueViolations.php       (new: shared dialect detector)
+  Projection/ProviderReceiptData.php      (new: closed receipt projection)
   Lifecycle/SubscriptionSubjectDataPurger.php     (new)
   Lifecycle/TenantIntegration.php         (new: table registration + runner access)
   SubscriptionService.php                 (modified: subject core + facade)
@@ -55,6 +57,7 @@ tests/… (mirrors: new Unit/Subject*, Integration/PrepareV2CommandTest,
   Integration/SubjectMigrationTest, Integration/Projection/ReceiptTest,
   Integration/Resolution/MemberEntitlementResolverTest,
   Integration/Lifecycle/*, Integration/Concurrency/PostgresSavepointTest)
+  Support/V2SubscriptionsTestCase.php    (isolated post-006 harness until Task 9)
 ```
 
 ---
@@ -138,11 +141,12 @@ public function getDescription(): string
 
 **Files:**
 - Create: `src/Console/PrepareV2Command.php`
+- Modify: `src/Plans/PlanManagementService.php` (defer audits with `Connection::afterCommit()`)
 - Test: `tests/Integration/Console/PrepareV2CommandTest.php` (new)
 
 **Interfaces:**
-- Consumes: `PlanManagementService::importFromConfig()` (existing 1.x, verify exact name via `src/Plans/PlanManagementService.php` — it backs `subscriptions:plans:import-config`; reuse, do not duplicate import logic), `SubscriptionPlanRepository`, `SubscriptionRepository` (raw distinct plan_key query via `db($context)`), table `subscription_v2_preparation`.
-- Produces: command name `subscriptions:prepare-v2` (Symfony `#[AsCommand]`, discovered by the existing `discoverCommands('...\Console', …)`); marker row protocol: delete `subject-model-v2` marker (committed), import + synthesize, verify, write single marker with `catalog_signature` = the `PlanCatalog::version()` value and JSON `report` `{imported: [...], synthesized: [...], verified_keys: N}`.
+- Consumes the existing exact API `PlanManagementService::importConfig(bool $force = false, string $status = 'active'): array`; the command calls `importConfig(false, 'active')` and derives imported keys from the returned decoded plan rows. It also consumes `SubscriptionPlanRepository`, a raw distinct-plan-key read via `db($context)`, and `subscription_v2_preparation`.
+- Produces command `subscriptions:prepare-v2`, discovered by the existing provider. Protocol: delete the old `subject-model-v2` marker in its own committed statement; then one outer transaction performs config import, dangling-plan synthesis, final verification, and insertion of exactly one replacement marker. Any failure rolls back every imported/synthesized plan and leaves no marker. Success messages and plan audit records are emitted only after the outer transaction commits.
 
 - [ ] **Step 1: Write the failing tests** — `tests/Integration/Console/PrepareV2CommandTest.php` (extend `SubscriptionsTestCase`; mirror the existing console test style in `tests/Integration/Console/` for how commands are constructed and executed with a `CommandTester`):
 
@@ -176,7 +180,7 @@ public function testPreparesConfigPlansSynthesizesDanglingAndWritesMarker(): voi
     // Dangling key synthesized as archived, empty entitlements.
     $legacy = (new SubscriptionPlanRepository())->findByKey($this->context, 'legacy-gold');
     self::assertSame('archived', $legacy['status']);
-    self::assertSame([], json_decode((string) $legacy['entitlements'], true));
+    self::assertSame([], $legacy['entitlements']); // repository rows are already decoded
 
     // Exactly one marker with a report naming the synthesis.
     $markers = db($this->context)->table('subscription_v2_preparation')->get();
@@ -211,6 +215,9 @@ public function testFailedVerificationLeavesNoMarker(): void
     $exit = $this->runPrepare();
     self::assertNotSame(0, $exit);
     self::assertCount(0, db($this->context)->table('subscription_v2_preparation')->get());
+    self::assertNull((new SubscriptionPlanRepository())->findByKey($this->context, 'free'));
+    self::assertNull((new SubscriptionPlanRepository())->findByKey($this->context, 'pro'));
+    self::assertSame([], $this->recordingAudit->records());
 }
 ```
 
@@ -222,62 +229,73 @@ protected function execute(InputInterface $input, OutputInterface $output): int
 {
     $context = $this->context();
 
-    // (1) Committed marker delete: an interrupted run must leave NO authority.
+    // (1) Committed marker delete: an interrupted or failed run leaves NO authority.
     db($context)->table('subscription_v2_preparation')
         ->where('marker_key', '=', 'subject-model-v2')->delete();
 
-    // (2) Import config plans (reuse the exact import-config service path).
-    $imported = $this->planManagement->importFromConfig($context); // create-missing only
+    try {
+        $result = db($context)->transaction(function () use ($context): array {
+            // (2) Nested service transactions become savepoints under this authority.
+            $importedRows = $this->planManagement->importConfig(false, 'active');
+            $imported = array_values(array_map(
+                static fn (array $row): string => (string) $row['plan_key'],
+                $importedRows
+            ));
 
-    // (3) Synthesize archived empty-entitlement plans for dangling keys.
-    $synthesized = [];
-    $keys = array_column(
-        db($context)->table('subscriptions')->select(['plan_key'])->distinct()->get(),
-        'plan_key'
-    );
-    foreach ($keys as $key) {
-        $key = (string) $key;
-        if ($key === '') {
-            $output->writeln('<error>subscription with empty plan_key cannot be prepared</error>');
-            return self::FAILURE;
-        }
-        if ($this->plans->findByKey($context, $key) === null) {
-            $this->plans->insert($context, [
-                'uuid' => Utils::generateNanoID(12), 'plan_key' => $key,
-                'display_name' => $key, 'entitlements' => [],
-                'status' => 'archived', 'sort_order' => 0,
+            // (3) Synthesize archived empty-entitlement plans for dangling keys.
+            $synthesized = [];
+            $keys = array_column(
+                db($context)->table('subscriptions')->select(['plan_key'])->distinct()->get(),
+                'plan_key'
+            );
+            foreach ($keys as $key) {
+                $key = (string) $key;
+                if ($key === '') {
+                    throw new \RuntimeException('subscription with empty plan_key cannot be prepared');
+                }
+                if ($this->plans->findByKey($context, $key) === null) {
+                    $this->plans->insert($context, [
+                        'uuid' => Utils::generateNanoID(12), 'plan_key' => $key,
+                        'display_name' => $key, 'entitlements' => [],
+                        'status' => 'archived', 'sort_order' => 0,
+                    ]);
+                    $synthesized[] = $key;
+                }
+            }
+
+            // (4) Final verification under the same transaction.
+            foreach ($keys as $key) {
+                if ($this->plans->findByKey($context, (string) $key) === null) {
+                    throw new \RuntimeException("verification failed: '{$key}' unresolved");
+                }
+            }
+
+            // (5) The marker is the final write in the same transaction.
+            db($context)->table('subscription_v2_preparation')->insert([
+                'marker_key' => 'subject-model-v2',
+                'catalog_signature' => PlanCatalog::fromContext($context)->version(),
+                'report' => json_encode([
+                    'imported' => $imported, 'synthesized' => $synthesized,
+                    'verified_keys' => count($keys),
+                ], JSON_THROW_ON_ERROR),
             ]);
-            $synthesized[] = $key;
-            $output->writeln("<comment>synthesized archived plan '{$key}' (empty entitlements)</comment>");
-        }
+
+            return compact('imported', 'synthesized', 'keys');
+        });
+    } catch (\Throwable $e) {
+        $output->writeln('<error>' . $e->getMessage() . '</error>');
+        return self::FAILURE;
     }
 
-    // (4) Final verification: EVERY distinct subscription plan_key resolves.
-    foreach ($keys as $key) {
-        if ($this->plans->findByKey($context, (string) $key) === null) {
-            $output->writeln("<error>verification failed: '{$key}' unresolved</error>");
-            return self::FAILURE;
-        }
+    foreach ($result['synthesized'] as $key) {
+        $output->writeln("<comment>synthesized archived plan '{$key}' (empty entitlements)</comment>");
     }
-
-    // (5) Single marker + report, one transaction.
-    db($context)->transaction(function () use ($context, $imported, $synthesized, $keys): void {
-        db($context)->table('subscription_v2_preparation')->insert([
-            'marker_key' => 'subject-model-v2',
-            'catalog_signature' => PlanCatalog::fromContext($context)->version(),
-            'report' => json_encode([
-                'imported' => $imported, 'synthesized' => $synthesized,
-                'verified_keys' => count($keys),
-            ], JSON_THROW_ON_ERROR),
-        ]);
-    });
-
     $output->writeln('<info>v2 preparation complete.</info>');
     return self::SUCCESS;
 }
 ```
 
-If `PlanManagementService` has no reusable `importFromConfig` returning imported keys, extract one from the existing import-config command body into the service (moving logic, not duplicating), keep the command delegating, and return the imported key list.
+Change the existing `PlanManagementService::emitAudit()` implementation to register its current emission callback with `db($this->context)->afterCommit(...)`. `Connection::afterCommit()` runs immediately outside a transaction and queues under this command's outer transaction, preserving existing callers while suppressing false success audits on rollback. Add a focused test proving outer rollback emits zero records and outer commit emits each plan audit exactly once.
 
 - [ ] **Step 4: Run to verify pass** — targeted filter, then full suite + phpstan + phpcs.
 - [ ] **Step 5: Commit** — `feat: subscriptions:prepare-v2 upgrade-bridge command`
@@ -343,7 +361,8 @@ public function validate(ApplicationContext $context, Subject $subject): bool
 
 **Files:**
 - Create: `migrations/006_SubjectModel.php`
-- Test: `tests/Integration/SubjectMigrationTest.php` (new; drives `006` explicitly against a 1.x-shaped DB — do NOT add `006` to `SubscriptionsTestCase::setUp()` yet; that happens at the END of this task once shapes pass)
+- Create: `tests/Support/V2SubscriptionsTestCase.php`
+- Test: `tests/Integration/SubjectMigrationTest.php` (new; drives `006` explicitly against a 1.x-shaped DB)
 
 **Interfaces (produced):** post-006 schema exactly as spec §2, including new table `subscription_provider_event_receipts` (`uuid`, `provider_gateway`, `provider_logical_event_key NULL`, `event_type`, candidate_* ×4, resolved `tenant_uuid`/`subject_type`/`subject_uuid`/`plan_uuid` (all nullable), `outcome`, `rejection_code NULL`, `data JSON NULL`, `created_at`, `UNIQUE (provider_gateway, provider_logical_event_key)`).
 
@@ -385,6 +404,8 @@ public function testFreshInstallSkipsMarkerRequirement(): void  // zero subscrip
 public function testEventsBackfillIntoAcceptedReceipts(): void  // provider events (non-null gateway+key) copied, outcome=accepted, uuid reused; manual events NOT copied
 public function testPlansGainScopeColumnsAndScopedUnique(): void // audience/owner defaults; (audience,owner,plan_key) unique allows platform-pro + two workspaces' pro; drop of UNIQUE(plan_key) proven
 public function testOverridesUniqueBecomesSubjectScoped(): void
+public function testDownRefusesWhenV2SubjectOrWorkspaceCatalogDataExists(): void
+public function testDownReversesACompatibleTenantOnlyFixture(): void
 ```
 
 - [ ] **Step 2:** RED (class `SubjectModel` missing).
@@ -417,11 +438,13 @@ if ($hasLegacyRows) {
 //        WHERE p.plan_key = subscriptions.plan_key) WHERE plan_uuid IS NULL;
 // (3) Abort-if-unresolved: SELECT COUNT(*) WHERE plan_uuid IS NULL — >0 ⇒ RuntimeException
 //     (names the offending keys via a second query, then throws).
-// (4) Constrain: alter plan_uuid to NOT NULL; drop UNIQUE(tenant_uuid) on subscriptions;
+// (4) Constrain: alter plan_uuid to NOT NULL; drop the exact create-time index
+//     `subscriptions_tenant_uuid_unique` (from migration 001);
 //     add UNIQUE(tenant_uuid, subject_type, subject_uuid) as uniq_subscriptions_subject;
 //     overrides: drop uniq_override_tenant_entitlement, add
 //     UNIQUE(tenant_uuid, subject_type, subject_uuid, entitlement) as uniq_override_subject_entitlement;
-//     plans: drop UNIQUE(plan_key), add UNIQUE(audience, owner_tenant_uuid, plan_key)
+//     plans: drop the exact create-time index `subscription_plans_plan_key_unique`
+//     (from migration 004), add UNIQUE(audience, owner_tenant_uuid, plan_key)
 //     as uniq_plans_scope_key.
 // (5) Receipts table create (full column list from Interfaces above).
 // (6) Receipts backfill: INSERT INTO subscription_provider_event_receipts
@@ -433,14 +456,16 @@ if ($hasLegacyRows) {
 //     WHERE provider_gateway IS NOT NULL AND provider_logical_event_key IS NOT NULL;
 ```
 
-Index/unique drop-and-add go through the schema builder where its alter API supports them; where it does not, use `addPendingOperation()` with per-dialect guards ONLY if unavoidable — check `Builders/` for `dropIndex`/`addIndex` alter support first and prefer it. `down()` reverses the constraint swaps, drops the receipts table and added columns (document that `plan_uuid` data loss on down is acceptable — down exists for dev only, like `001–004`).
+Index/unique drop-and-add use the exact names above. Prefer the schema builder's alter API; use a documented dialect-specific pending operation only if that API cannot express the operation.
 
-- [ ] **Step 4:** GREEN on `SubjectMigrationTest`; then add `(new SubjectModel())->up($schema);` to `SubscriptionsTestCase::setUp()` (after `005`) and fix any fallout in existing tests (there should be none — defaults keep 1.x-shaped inserts valid; where an existing test asserts the OLD unique `tenant_uuid` behavior, update it to the triple form and note it in the commit message). Full suite + gates green.
+`down()` is reversible only while the database remains representable by 1.x. Before any DDL, it must fail closed when any `subject_type <> 'tenant'` row exists, any `audience='user'`/non-platform plan exists, or any receipt cannot be derived solely from a legacy event. The exception instructs operators to restore a pre-v2 backup. A compatible tenant-only fixture reverses the constraint names, removes v2 columns/tables, and restores the two exact 1.x unique indexes. This preflight is tested; do not silently discard membership/catalog/receipt data under a "dev only" rationale.
+
+- [ ] **Step 4:** GREEN on `SubjectMigrationTest`; create `V2SubscriptionsTestCase` extending `SubscriptionsTestCase`. Its `setUp()` calls parent first, applies `006` while the database has zero subscription rows, imports/seeds explicit platform plans, and its `seedSubscription()` override resolves and writes `plan_uuid`, `subject_type`, and `subject_uuid`. Tasks 6–8 place new v2 tests on this isolated harness. **Do not add `006` to the shared `SubscriptionsTestCase` in this task**: current production services and legacy fixture helpers cannot yet satisfy `plan_uuid NOT NULL`. The shared-harness switch is Task 9's coordinated activation boundary. Full legacy suite + migration suite + v2 harness smoke test + gates green.
 - [ ] **Step 5:** Commit `feat!: subject-model migration 006 with receipts table and guarded upgrade`.
 
 ### Task 6: Subject-aware repositories + receipts repository
 
-**Files:** Modify all four repositories; Create `src/Repositories/ProviderEventReceiptRepository.php`; Tests in `tests/Integration/Repositories/`.
+**Files:** Modify all four repositories; Create `src/Repositories/ProviderEventReceiptRepository.php`, `src/Repositories/UniqueViolations.php`; Tests in `tests/Integration/Repositories/` on `V2SubscriptionsTestCase`.
 
 **Interfaces (produced):**
 
@@ -448,10 +473,12 @@ Index/unique drop-and-add go through the schema builder where its alter API supp
 // SubscriptionRepository
 public function findBySubject(ApplicationContext $c, Subject $s): ?array;   // triple match
 public function updateBySubject(ApplicationContext $c, Subject $s, array $changes): void;
-// findByTenant/updateByTenant REMAIN, reimplemented as: findBySubject($c, Subject::tenant($t))
+// findByTenant/updateByTenant REMAIN byte-compatible in this task; Task 9 switches
+// them to Subject::tenant delegates at the coordinated activation boundary.
 
 // OverrideRepository
-public function activeForSubject(ApplicationContext $c, Subject $s): array; // activeForTenant delegates via Subject::tenant
+public function activeForSubject(ApplicationContext $c, Subject $s): array;
+// activeForTenant remains byte-compatible until Task 9, then delegates via Subject::tenant.
 
 // SubscriptionPlanRepository — every finder gains scope:
 public function findByUuid(ApplicationContext $c, string $uuid): ?array;
@@ -459,7 +486,8 @@ public function findByKeyInScope(ApplicationContext $c, string $audience, string
 public function findResolvableByKeyInScope(...same signature...): ?array;
 public function listInScope(ApplicationContext $c, string $audience, string $owner): array;
 public function maxUpdatedAtInScope(ApplicationContext $c, string $audience, string $owner): ?string;
-// 1.x names findByKey/findResolvableByKey/list/maxUpdatedAt delegate to platform scope ('tenant','')
+// 1.x names remain byte-compatible through Task 8; Task 9 switches them to
+// platform scope ('tenant','') after the shared schema/harness is activated.
 
 // ProviderEventReceiptRepository
 public function insertPending(ApplicationContext $c, array $row): void;     // throws on claim-unique violation
@@ -471,7 +499,8 @@ public function isUniqueViolation(\Throwable $e): bool; // extracted SHARED help
 // src/Repositories/UniqueViolations.php static and delegate from both repos (spec §8's shared detector).
 ```
 
-- [ ] Steps: failing tests for each new finder (triple-match semantics: `findBySubject` must NOT return a user row for `Subject::tenant`), extraction test for `UniqueViolations::isUniqueViolation` covering the sqlite + mysql + postgres message shapes already handled by the existing helper; implement; suite + gates; commit `feat: subject-aware repositories and provider-event receipt repository`.
+- [ ] Add repository-boundary validation to `SubscriptionEventRepository::insertOrThrow()`: construct/validate the static identity before SQL; tenant, type, and subject UUID must be non-empty; type must be exactly `tenant|user`; tenant subjects require `subject_uuid === tenant_uuid`. This validates coherence only (host existence remains `SubjectResolverInterface`'s job). Malformed events throw `InvalidArgumentException`, never enter `subscription_events`, and rejected provider attempts remain receipts only. Update every direct event fixture/helper to carry a coherent triple.
+- [ ] Steps: failing tests for each new finder (triple-match semantics: `findBySubject` must NOT return a user row for `Subject::tenant`), event-boundary rejection tests, and an extraction test for `UniqueViolations::isUniqueViolation` covering the SQLite/MySQL/PostgreSQL shapes already handled by the current helper; implement on `V2SubscriptionsTestCase`; run the untouched legacy suite too; commit `feat: subject-aware repositories and provider-event receipt repository`.
 
 ### Task 7: Scoped, DB-authoritative `PlanCatalog`
 
@@ -480,7 +509,7 @@ public function isUniqueViolation(\Throwable $e): bool; // extracted SHARED help
 **Interfaces (produced):**
 
 ```php
-public static function fromContext(ApplicationContext $context): self;            // platform scope ('tenant','')
+public static function fromContext(ApplicationContext $context): self;            // legacy overlay until Task 9
 public static function forScope(ApplicationContext $context, string $audience, string $ownerTenantUuid): self;
 public function audience(): string;
 public function ownerTenantUuid(): string;
@@ -489,45 +518,71 @@ public function planUuidForKey(string $planKey): ?string;                       
 public function entitlementsForUuid(string $planUuid): array;                     // NEW: uuid-first read
 public function isAssignableUuid(string $planUuid): bool;                         // NEW
 public function providerPriceIdForUuid(string $planUuid): ?string;                // NEW
-// 1.x key-based methods (entitlementsFor/planExists/isAssignable/providerPriceId) REMAIN,
-// resolving key→row WITHIN the scope, with NO config fallback (overlay removed).
+// On forScope(), key-based methods resolve only DB rows within that scope.
+// fromContext() preserves its 1.x config overlay until Task 9 flips it to
+// forScope($context, 'tenant', '') and deletes the transitional branch.
 public function graceDays(): int;                    // unchanged (config)
 public function version(): string;                   // audience:owner:maxUpdatedAtInScope (no config hash)
 ```
 
-- [ ] **Failing tests:** overlay removal (a config-only plan key resolves to nothing until imported — flip the existing overlay expectation tests to the new contract and seed DB rows via the Task 2 import instead); scope isolation (same key in platform and a workspace scope resolves independently; `forScope('user','w-1')` never sees platform rows); `defaultPlan()` throws outside the platform scope; `version()` changes when a scoped row updates and differs between scopes.
-- [ ] Implement (constructor gains `audience`/`owner` with platform defaults; drop every `$this->config['plans']` read except `default_plan`/`grace_days`; delete the config-hash half of `version()`).
-- [ ] Suite + gates; commit `feat!: scoped DB-authoritative plan catalog`.
+- [ ] **Failing tests on `V2SubscriptionsTestCase`:** `forScope()` has no overlay (a config-only key resolves to nothing until imported); scope isolation (same key in platform and a workspace scope resolves independently; `forScope('user','w-1')` never sees platform rows); `defaultPlan()` throws outside the platform scope; scoped `version()` changes when a row updates and differs between scopes. Existing `fromContext()` overlay tests remain unedited and green in this task.
+- [ ] Implement the scoped DB-authoritative path (constructor gains audience/owner; scoped methods never read config plans). Keep a narrowly marked transitional branch in `fromContext()` for legacy callers. Task 9 must remove it, make `fromContext()` return platform `forScope()`, delete the config-hash half of `version()`, and flip the existing overlay tests. Run both harnesses + gates.
+- [ ] Commit `feat: add scoped DB-authoritative plan catalog path` (the breaking cutover is Task 9).
 
 ### Task 8: Scope-aware plan management + immutable `plan_key`
 
 **Files:** Modify `src/Plans/PlanManagementService.php`, `src/Plans/PlanPayloadValidator.php`, the `src/Console/Plans/*` commands, `src/Http/PlanController.php` (platform scope pinned); Tests: extend `tests/Integration/PlanManagementServiceTest.php` + console tests.
 
-- [ ] **Failing tests:** create/update/archive accept an explicit scope `(audience, ownerTenantUuid)` and enforce spec §2's invariants (`audience='tenant'` ⇒ owner `''`; `audience='user'` ⇒ owner non-empty — violations throw the validator's existing exception type); **update rejects any `plan_key` change** (immutability — new validator rule, exact message `plan_key is immutable`); `plans:*` console commands accept `--audience=` and `--owner=` defaulting to platform scope and behave 1.x-identically without them; `PlanController` (HTTP) manages ONLY the platform scope (no new params — assert a request cannot reach a workspace scope); import-config imports into the platform scope.
-- [ ] Implement; suite + gates; commit `feat!: scope-aware plan management with immutable plan keys`.
+**Interfaces (exact host-facing API):**
+
+```php
+public function createInScope(string $audience, string $ownerTenantUuid, array $payload): array;
+public function updateInScope(
+    string $audience,
+    string $ownerTenantUuid,
+    string $planKey,
+    array $payload
+): array;
+public function archiveInScope(string $audience, string $ownerTenantUuid, string $planKey): array;
+public function findInScope(string $audience, string $ownerTenantUuid, string $planKey): ?array;
+public function listInScope(string $audience, string $ownerTenantUuid): array;
+```
+
+The existing `create/update/archive/find/list/importConfig` signatures remain unchanged. Through Task 8 they retain their 1.x behavior; Task 9 switches them to platform-scope delegates `('tenant', '')`. `importConfig()` is always platform-only and never accepts a scope.
+
+- [ ] **Failing tests:** the five exact scoped methods enforce spec §2 (`tenant` requires owner `''`; `user` requires non-empty owner); **update rejects any `plan_key` change** with exact message `plan_key is immutable`; `plans:*` commands accept `--audience=` and `--owner=` defaulting to platform scope; `PlanController` can reach only platform scope; import-config writes platform rows. Keep all existing no-option/service tests green during this additive task.
+- [ ] Implement and test on `V2SubscriptionsTestCase`; run the untouched legacy suite + gates; commit `feat: add scope-aware plan management and immutable plan keys`. Task 9 performs the breaking facade cutover.
 
 ### Task 9: Subject-aware `SubscriptionService` core + tenant facade
 
-**Files:** Modify `src/SubscriptionService.php`; Tests: extend `tests/Integration/SubscriptionServiceTest.php` + new `tests/Integration/SubscriptionServiceSubjectTest.php`.
+**Files:** Modify `src/SubscriptionService.php`, `src/Catalog/PlanCatalog.php`, `src/Plans/PlanManagementService.php`, the four repositories from Task 6, `tests/Support/SubscriptionsTestCase.php`, and every test fixture/direct insert found by the activation inventory; Tests: extend `tests/Integration/SubscriptionServiceTest.php` + new `tests/Integration/SubscriptionServiceSubjectTest.php`, `SubscriptionServiceFacadeTest.php`.
 
 **Interfaces (produced):** exactly spec §7's five `…For(Subject …)` methods (with `startFor(Subject $s, string $planUuid, array $opts = [])`); the five 1.x tenant methods preserved as facades (`start()` maps `planKey` → `planUuidForKey` in the platform catalog and calls `startFor`).
 
 Key implementation requirements (each with its own failing test first):
 
+- [ ] **Coordinated activation boundary:** before changing code, inventory every raw write/read that assumes the old shapes:
+
+  ```bash
+  rg -n "table\(['\"](subscriptions|subscription_overrides|subscription_events|subscription_plans)['\"]\)|seedSubscription\(|INSERT INTO (subscriptions|subscription_events)" tests src
+  ```
+
+  Record the resulting file list in the commit message/checklist. Then, in one task: apply `SubjectModel` after `005` in the shared `SubscriptionsTestCase`; import/seed platform plans before subscription fixtures; update `seedSubscription()` and every direct subscription/event insert with `plan_uuid` and a coherent subject triple; switch `findByTenant/updateByTenant/activeForTenant` and legacy plan-repository methods to their subject/platform delegates; make `PlanCatalog::fromContext()` DB-authoritative platform scope and remove the Task-7 transitional overlay; switch existing plan-management methods to the Task-8 platform facades. No half-cutover commit is allowed. The old suite must first fail for the expected schema/catalog reasons, then pass after the coordinated changes.
 - [ ] **Transactional lifecycle (spec §8):** every state change + its event append run inside `db($this->context)->transaction(...)` — `startFor`, `changePlanFor`, `cancelFor`, `reconcileFor` (the reconcile drift-write + event). Event rows now include the subject columns (`tenant_uuid` = subject tenantUuid, `subject_type`, `subject_uuid`).
 - [ ] **Deterministic race (spec §8):** `startFor` inserts inside a transaction with the insert wrapped in a NESTED `transaction(...)` call (the framework promotes nesting to savepoints — this is the PG isolation). On `UniqueViolations::isUniqueViolation`: re-read via `findBySubject`; same `plan_uuid` → return winner row (idempotent); different `plan_uuid` → throw new `SubscriptionConflictException` (create `src/SubscriptionConflictException.php`, extends `\RuntimeException`) and change nothing. Test both outcomes by pre-inserting the winner row before calling `startFor`.
 - [ ] **Subject validation (spec §4):** constructor gains `SubjectResolverInterface $subjects`; every `…For` method first requires `$this->subjects->validate($this->context, $s)` (throws `\InvalidArgumentException('invalid subject')` otherwise) and audience-matching: the plan row's `(audience, owner_tenant_uuid)` must be `('tenant','')` for tenant subjects and `('user', $s->tenantUuid)` for user subjects (test: a bound permissive fake resolver + wrong-scope plan → rejected).
 - [ ] **Plan reference:** rows are written with BOTH `plan_uuid` (authoritative) and denormalized `plan_key` (read from the plan row); `changePlanFor` refreshes both + `provider_price_id` from the target plan row.
 - [ ] Facade-equivalence test file: copy the strongest existing 1.x lifecycle test METHODS verbatim into `SubscriptionServiceFacadeTest.php` (per spec §11.2 — they must pass unmodified apart from the test-case import).
-- [ ] Suite + gates; commit `feat!: subject-aware subscription lifecycle with preserved tenant facade`.
+- [ ] Run both the now-activated shared harness and focused v2 tests, then full suite + gates; commit the activation and lifecycle atomically as `feat!: activate subject-aware lifecycle with preserved tenant facade`.
 
 ### Task 10: Receipts-first projector
 
-**Files:** Modify `src/Projection/SubscriptionEventProjector.php`; Tests: extend `tests/Integration/Projection/` (+ new `ReceiptProjectionTest.php`).
+**Files:** Modify `src/Projection/SubscriptionEventProjector.php`; Create `src/Projection/ProviderReceiptData.php`; Tests: extend `tests/Integration/Projection/` (+ new `ReceiptProjectionTest.php`).
 
 Behavior (each bullet test-first; keep the existing state-machine mapping `computeChanges()` byte-identical):
 
-- [ ] **Claim-first receipts:** `project()` opens ONE transaction; inserts a `pending` receipt (candidate identity from normalized metadata: `candidate_tenant_uuid`, `candidate_subject_type`, `candidate_subject_uuid`, `candidate_plan_uuid`; sanitized `data`) — the receipt's `(gateway, logical_key)` unique is the FIRST claim; a duplicate loses here (existing cheap read-side early-out now checks the receipts table).
+- [ ] **Claim-first receipts:** `project()` opens ONE transaction; inserts a `pending` receipt (candidate identity from normalized metadata: `candidate_tenant_uuid`, `candidate_subject_type`, `candidate_subject_uuid`, `candidate_plan_uuid`; closed-projection `data`) — the receipt's `(gateway, logical_key)` unique is the FIRST claim; a duplicate loses here (existing cheap read-side early-out now checks the receipts table).
+- [ ] **Receipt-data contract:** `ProviderReceiptData::sanitize(array $providerPayload): array` is the only path into `receipts.data`. Its closed allowlist is `gateway_subscription_id`, `status`, `current_period_end`, plus `metadata` restricted to `tenant_uuid`, `subject_type`, `subject_uuid`, and `plan_uuid`. Raw payloads and customer/email/billing fields are never stored. Keys matching `token|secret|password|authorization|signature|api_key|client_secret` are rejected recursively as defense in depth. Tests feed hostile nested secrets and assert they are absent while the four identity fields and lifecycle status needed for diagnosis survive.
 - [ ] **`subscription.created` requires the complete triple** in metadata AND `SubjectResolverInterface::validate` passing AND plan-audience coherence → otherwise `markRejected` with an allowlisted code (`missing_subject`, `invalid_subject`, `plan_scope_mismatch`, `unmapped_subscription`) and COMMIT the rejected receipt; NO `subscription_events` row, no state change. The 1.x tenant-metadata relink recovery path survives but only for validated tenant subjects (the relink block in `mapToSubscription` keeps its no-move rule and logging).
 - [ ] **Later event types:** row located by `(gateway, provider_subscription_id)` as today; any subject metadata present is cross-checked against the stored triple → mismatch = `markRejected('subject_mismatch')`, no state/event write.
 - [ ] **Accepted path:** append the validated `subscription_events` row (with subject columns, backstop unique intact), apply changes via `updateBySubject`, `markAccepted` with the resolved identity — all in the one transaction.
@@ -563,9 +618,10 @@ final class MemberEntitlementResolver
 
 ### Task 13: Console subject options
 
-**Files:** Modify `src/Console/{ShowCommand,SetPlanCommand,ReconcileCommand}.php` (actual file names per `src/Console/` — keep 1.x signatures/behavior verbatim without the new options); Tests: extend `tests/Integration/Console/`.
+**Files:** Modify `src/Console/ShowSubscriptionCommand.php`, `src/Console/SetPlanCommand.php`, `src/Console/ReconcileCommand.php`; Tests: extend `tests/Integration/Console/`.
 
-- [ ] `--subject-type=` (`tenant`|`user`, default `tenant`) and `--subject-uuid=` (default: the tenant argument) on all three; `subscriptions:set-plan` resolves the plan within the audience-matching scope (user subjects → the workspace's member catalog). Invalid combos (user type without uuid) exit non-zero with a one-line error. Tests for default-behavior preservation + one user-subject flow each.
+- [ ] `--subject-type=` (`tenant`|`user`, default `tenant`) and `--subject-uuid=` on all three. Tenant mode defaults subject UUID to `--tenant`; user mode requires both non-empty `--tenant` and `--subject-uuid`. `subscriptions:set-plan` resolves within the audience-matching catalog. Invalid combinations exit non-zero with one line.
+- [ ] **Reconcile-all correctness:** the no-filter branch still iterates `SubscriptionRepository::allWithProvider()`, but reconstructs each row as `new Subject($row['tenant_uuid'], $row['subject_type'], $row['subject_uuid'])` and calls `reconcileFor()`. It must never call the tenant facade for user rows. A mixed fixture (one tenant and one user subscription, same workspace allowed) proves each exact subject is reconciled once, neither is cross-targeted, and the reported count is two. `--tenant` with default type preserves the existing tenant-only CLI behavior.
 - [ ] Suite + gates; commit `feat: subject options for subscription console commands`.
 
 ### Task 14: Provider wiring, config, docs
@@ -578,9 +634,10 @@ final class MemberEntitlementResolver
 
 ### Task 15: PostgreSQL savepoint proof (env-gated)
 
-**Files:** Create `tests/Integration/Concurrency/PostgresSavepointTest.php`.
+**Files:** Create `tests/Integration/Concurrency/PostgresSavepointTest.php`, `.github/workflows/ci.yml`; Modify `README.md`.
 
-- [ ] Test skips (`markTestSkipped`) unless `SUBSCRIPTIONS_TEST_PG_DSN` (+`_USER`/`_PASS`) env vars are set; when set, builds a `Connection` against PG, runs migrations 001–006, then inside one transaction: pre-insert a subject row, call `startFor` for the same subject (unique violation inside the savepoint), assert the OUTER transaction still commits a subsequent write (the poisoned-transaction failure mode this exists to prevent), and assert same-plan idempotency + different-plan `SubscriptionConflictException` behave identically to SQLite. Document the DSN vars in README's testing section; add a CI job provisioning postgres (mirror the repo's existing CI workflow file structure).
+- [ ] Test skips (`markTestSkipped`) unless `SUBSCRIPTIONS_TEST_PG_DSN` (+`_USER`/`_PASS`) env vars are set; when set, builds a `Connection` against PG, runs migrations 001–006, then inside one transaction: pre-insert a subject row, call `startFor` for the same subject (unique violation inside the savepoint), assert the OUTER transaction still commits a subsequent write (the poisoned-transaction failure mode this exists to prevent), and assert same-plan idempotency + different-plan `SubscriptionConflictException` behave identically to SQLite. Document the DSN variables in README.
+- [ ] This repository has no existing GitHub workflow to mirror. Create `.github/workflows/ci.yml` explicitly: PHP 8.3, Composer install/cache, the normal PHPUnit/PHPStan/PHPCS gates, plus a PostgreSQL 16 service with health check and the three `SUBSCRIPTIONS_TEST_PG_*` variables wired to the test job. The PostgreSQL test must execute rather than report skipped; assert that in the job output/command selection. Keep the local no-DSN skip path green.
 - [ ] Local run: skip path green; if a local PG is available, full path green. Commit `test: env-gated PostgreSQL savepoint isolation proof`.
 
 ### Task 16: Release 2.0.0
@@ -596,5 +653,6 @@ final class MemberEntitlementResolver
 
 - **Spec coverage:** §1→Task 4; §2→Tasks 5–6; §3→Tasks 1–2, 7–8; §4→Tasks 4, 9, 10; §5→Task 11; §6→Task 10 (+14 docs); §7→Task 9; §8→Tasks 9, 15; §9→Task 12; §10→Task 14; §11.1→Tasks 2, 5; §11.2→Task 9; §11.3→Tasks 7–8; §11.4→Tasks 4, 9, 10; §11.5→Task 10; §11.6→Task 11; §11.7→Tasks 9, 15; §11.8→Task 11; §11.9→Task 12. No uncovered spec section.
 - **Known intentional deferrals:** none within scope; out-of-scope list (spec §12) untouched.
-- **Type consistency:** `Subject`/`SubjectType`/`SubjectResolverInterface` (Task 4) are the shapes consumed by Tasks 6, 9, 10, 11, 12, 13; `UniqueViolations` (Task 6) consumed by Tasks 9–10; `PlanCatalog::forScope`/`planUuidForKey` (Task 7) consumed by Tasks 8–9, 13; `SubscriptionConflictException` defined in Task 9, referenced in Task 15.
-- **Placeholder scan:** the two "per `src/Console/…` actual file names" notes instruct the engineer to read real file names rather than inventing them — acceptable reads, not placeholders; no TBD/TODO items remain.
+- **Type consistency:** `Subject`/`SubjectType`/`SubjectResolverInterface` (Task 4) are the shapes consumed by Tasks 6, 9, 10, 11, 12, 13; `UniqueViolations` (Task 6) is consumed by Tasks 9–10; `PlanCatalog::forScope`/`planUuidForKey` (Task 7) are consumed by Tasks 8–9 and 13; `ProviderReceiptData` (Task 10) is the only receipt-data writer; `SubscriptionConflictException` is defined in Task 9 and referenced in Task 15.
+- **Activation consistency:** Tasks 5–8 use `V2SubscriptionsTestCase`; Task 9 alone activates `006` in the shared harness and flips legacy facades/catalog behavior. This prevents an intermediate commit with `plan_uuid NOT NULL` but old production writers.
+- **Placeholder scan:** all console class names and CI files are explicit; no TBD/TODO or "verify exact name" instructions remain.
