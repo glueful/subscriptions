@@ -83,6 +83,54 @@ final class MemberEntitlementResolverTest extends SubscriptionsTestCase
         ], $row, ['value' => json_encode($row['value'], JSON_THROW_ON_ERROR)]));
     }
 
+    /**
+     * The ctor-injected catalog is pinned to ONE workspace (self::TENANT). Calling
+     * resolveMap() with a DIFFERENT tenantUuid must never silently resolve that
+     * other tenant's membership against THIS catalog's plans -- concretely: both
+     * workspaces define their own same-named 'pro' plan here, and workspace B's
+     * member must never receive workspace A's 'pro' entitlements just because A's
+     * catalog happened to be the one injected.
+     */
+    public function testResolveMapThrowsWhenTenantUuidDoesNotMatchCatalogScope(): void
+    {
+        $this->seedWorkspacePlan('pro', ['content.premium' => true]); // workspace A's 'pro'
+
+        $this->connection()->table('subscription_plans')->insert([
+            'uuid' => 'planworkspacebp',
+            'plan_key' => 'pro',
+            'display_name' => 'Pro',
+            'entitlements' => json_encode(['content.premium' => false], JSON_THROW_ON_ERROR),
+            'status' => 'active',
+            'sort_order' => 0,
+            'audience' => 'user',
+            'owner_tenant_uuid' => 'tenantB',
+        ]);
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantB',
+            'subject_type' => 'user',
+            'subject_uuid' => 'userB',
+            'plan_key' => 'pro',
+            'status' => 'active',
+        ]);
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        // $this->resolver() injects a catalog scoped to self::TENANT ('tenantA');
+        // calling it for 'tenantB' must refuse rather than resolve 'tenantB's
+        // membership against 'tenantA's catalog.
+        $this->resolver()->resolveMap($this->appContext(), 'tenantB', 'userB');
+    }
+
+    public function testResolveMapDoesNotThrowWhenTenantUuidMatchesCatalogScope(): void
+    {
+        $this->seedWorkspacePlan('member-pro', ['content.premium' => true]);
+        $this->seedMembership(['plan_key' => 'member-pro']);
+
+        $map = $this->resolver()->resolveMap($this->appContext(), self::TENANT, self::USER);
+
+        self::assertSame(['content.premium' => true], $map);
+    }
+
     public function testNoMembershipAndNoOverrideResolvesEmptyMap(): void
     {
         self::assertSame(
@@ -162,6 +210,26 @@ final class MemberEntitlementResolverTest extends SubscriptionsTestCase
 
         self::assertArrayNotHasKey('rate.tier.pro', $map);
         self::assertTrue($map['content.premium']);
+    }
+
+    /**
+     * Nothing normalizes entitlement keys anywhere in the system (config and
+     * plan-JSON paths are both unvalidated), so the strip must not be a bare
+     * case-sensitive prefix match -- a mixed-case or padded variant of
+     * `rate.tier.*` must be caught exactly the same as the canonical form.
+     */
+    public function testRateTierKeyIsStrippedRegardlessOfCaseAndPadding(): void
+    {
+        $this->seedWorkspacePlan('member-pro', [
+            'content.premium' => true,
+            'Rate.Tier.Pro' => true,
+            '  rate.tier.enterprise  ' => true,
+        ]);
+        $this->seedMembership(['plan_key' => 'member-pro']);
+
+        $map = $this->resolver()->resolveMap($this->appContext(), self::TENANT, self::USER);
+
+        self::assertSame(['content.premium' => true], $map);
     }
 
     public function testRateTierStrippingIsLoggedExactlyOncePerResolve(): void

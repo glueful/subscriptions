@@ -46,9 +46,43 @@ final class MemberEntitlementResolver
     ) {
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Guards the cross-workspace leak spec §1 forbids: the ctor-injected catalog
+     * is pinned to ONE workspace, so a resolver built for workspace A that is then
+     * called with workspace B's tenantUuid would otherwise find B's membership row
+     * and resolve B's plan_key against A's catalog -- if A happens to define a
+     * same-named plan ('pro', 'premium', ...), B's member would silently receive
+     * A's entitlements. Mirrors PlanPayloadValidator::validateScope()'s role as
+     * the guard against a plan crossing into the wrong (audience, owner) scope.
+     *
+     * @throws \InvalidArgumentException when $tenantUuid does not match the
+     *         catalog's own (audience='user', ownerTenantUuid) scope.
+     */
+    private function assertCatalogScopeMatches(string $tenantUuid): void
+    {
+        if ($this->catalog->audience() === 'user' && $this->catalog->ownerTenantUuid() === $tenantUuid) {
+            return;
+        }
+
+        throw new \InvalidArgumentException(sprintf(
+            "MemberEntitlementResolver: catalog scope (audience='%s', owner='%s') does not match "
+                . "the requested tenant scope (audience='user', owner='%s'); refusing to resolve "
+                . '-- this would leak one workspace\'s plan entitlements into another.',
+            $this->catalog->audience(),
+            $this->catalog->ownerTenantUuid(),
+            $tenantUuid
+        ));
+    }
+
+    /**
+     * @return array<string,mixed>
+     * @throws \InvalidArgumentException when $tenantUuid does not match the
+     *         ctor-injected catalog's own workspace scope.
+     */
     public function resolveMap(ApplicationContext $context, string $tenantUuid, string $userUuid): array
     {
+        $this->assertCatalogScopeMatches($tenantUuid);
+
         $subject = Subject::user($tenantUuid, $userUuid);
         $subscription = $this->subscriptions->findBySubject($context, $subject);
         $overrides = $this->overrides->activeForSubject($context, $subject);
@@ -96,7 +130,13 @@ final class MemberEntitlementResolver
         $anyStripped = false;
 
         foreach ($map as $key => $value) {
-            if (str_starts_with($key, 'rate.tier.')) {
+            // Nothing normalizes entitlement keys anywhere upstream (both the
+            // config seed path and the plan-JSON path are unvalidated free-form
+            // strings), so this must not be a bare case-sensitive prefix match --
+            // a mixed-case or whitespace-padded variant (`Rate.Tier.Pro`,
+            // `  rate.tier.enterprise  `) must be caught exactly like the
+            // canonical form.
+            if (str_starts_with(strtolower(trim((string) $key)), 'rate.tier.')) {
                 $anyStripped = true;
                 continue;
             }
