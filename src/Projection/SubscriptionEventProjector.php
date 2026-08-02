@@ -214,11 +214,18 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
 
         $columns = ['tenant_uuid' => 'tenant_uuid', 'subject_type' => 'subject_type', 'subject_uuid' => 'subject_uuid'];
         foreach ($columns as $metaKey => $column) {
-            if (!array_key_exists($metaKey, $metadata)) {
+            // scalarOrNull() is the single definition of "not supplied" shared with
+            // recoverCreatedSubscription() below -- an empty string or non-scalar
+            // value is treated as ABSENT, not as an explicit empty claim to check.
+            // Without this, a provider that echoes back an unset field as '' (or
+            // null) would mismatch against any non-empty stored value and reject
+            // every subsequent event for that subscription, permanently (the claim
+            // is never retried).
+            $given = $this->scalarOrNull($metadata[$metaKey] ?? null);
+            if ($given === null) {
                 continue;
             }
 
-            $given = (string) $this->scalarOrNull($metadata[$metaKey]);
             $stored = isset($sub[$column]) ? (string) $sub[$column] : '';
             if ($given !== $stored) {
                 return 'subject_mismatch';
@@ -231,9 +238,14 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     /**
      * The ONLY place a subscription.created event may establish trust in a subject
      * it hasn't already been linked to. Requires a complete triple (spec §2/§8):
-     * tenant_uuid is mandatory; subject_type/subject_uuid may be omitted for 1.x
-     * back-compat (defaults to the tenant self-subject) but if subject_type IS
-     * given, subject_uuid must be too. The resolved subject must then pass
+     * tenant_uuid is mandatory; subject_type/subject_uuid are an ATOMIC PAIR --
+     * mirroring SubscriptionEventRepository's own coherence rule -- so they may
+     * BOTH be omitted for 1.x back-compat (defaults to the tenant self-subject),
+     * but ONE present without the other is an incomplete triple, never a partial
+     * default. Silently defaulting subject_type to 'tenant' while discarding a
+     * caller-supplied subject_uuid would relink a WORKSPACE row using an event
+     * that actually named a member -- a member's created event would then drive
+     * workspace billing state. The resolved subject must then pass
      * SubjectResolverInterface::validate() -- the shipped DefaultSubjectResolver
      * rejects every user subject, so this recovery path is effectively tenant-only
      * out of the box, matching the 1.x relink recovery it supersedes.
@@ -251,15 +263,15 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
         }
 
         $subjectType = $this->scalarOrNull($metadata['subject_type'] ?? null);
-        if ($subjectType === null) {
+        $subjectUuid = $this->scalarOrNull($metadata['subject_uuid'] ?? null);
+
+        if ($subjectType === null && $subjectUuid === null) {
             // 1.x shape: no subject fields at all -> a tenant self-subject.
             $subjectType = SubjectType::TENANT;
             $subjectUuid = $tenantUuid;
-        } else {
-            $subjectUuid = $this->scalarOrNull($metadata['subject_uuid'] ?? null);
-            if ($subjectUuid === null) {
-                return [null, 'missing_subject'];
-            }
+        } elseif ($subjectType === null || $subjectUuid === null) {
+            // One of the pair given without the other: incomplete, never defaulted.
+            return [null, 'missing_subject'];
         }
 
         $subject = new Subject($tenantUuid, $subjectType, $subjectUuid);

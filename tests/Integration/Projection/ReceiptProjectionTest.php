@@ -248,6 +248,35 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertSame(0, $this->eventCount());
     }
 
+    public function testMissingSubjectRejectsWhenSubjectUuidGivenButSubjectTypeIsMissing(): void
+    {
+        // The partial-pair rule cuts BOTH ways: subject_uuid present without
+        // subject_type must never silently default to a tenant self-subject --
+        // that would coerce a member's identity into the workspace's, and the
+        // workspace row would relink to the member's provider subscription.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'incomplete',
+        ]);
+
+        $this->project('subscription.created', 'k1', [
+            'gateway_subscription_id' => 'sub_NEW',
+            'status' => 'active',
+            'metadata' => ['tenant_uuid' => 'tenantA', 'subject_uuid' => 'user_1'],
+        ]);
+
+        $receipt = $this->receiptFor('paystack', 'k1');
+        self::assertIsArray($receipt);
+        self::assertSame('rejected', $receipt['outcome']);
+        self::assertSame('missing_subject', $receipt['rejection_code']);
+
+        $row = $this->row();
+        self::assertEmpty($row['provider_subscription_id'] ?? null); // NOT relinked
+        self::assertSame('incomplete', $row['status']);
+        self::assertSame(0, $this->eventCount());
+    }
+
     public function testInvalidSubjectRejectsAUserSubjectUnderTheDefaultResolver(): void
     {
         // DefaultSubjectResolver rejects every user subject (spec §4) -- a webhook
@@ -455,6 +484,11 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertIsArray($receipt);
         self::assertSame('rejected', $receipt['outcome']);
         self::assertSame('subject_mismatch', $receipt['rejection_code']);
+        // The raw (unresolved) candidate identity from metadata is preserved on
+        // the receipt even though it was never trusted -- diagnosability of a
+        // rejection depends on it.
+        self::assertSame('tenantB', $receipt['candidate_tenant_uuid']);
+        self::assertNull($receipt['tenant_uuid']); // never resolved -- rejected
 
         $row = $this->row();
         self::assertSame('trialing', $row['status']);
@@ -482,6 +516,68 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertSame('accepted', $receipt['outcome']);
         self::assertSame('past_due', $this->row()['status']);
         self::assertSame(1, $this->eventCount());
+    }
+
+    public function testEmptyStringSubjectTypeMetadataOnALaterEventIsTreatedAsAbsentNotMismatch(): void
+    {
+        // A provider that echoes back an unset metadata field as '' (rather than
+        // omitting the key) must NOT be read as an explicit empty claim -- that
+        // would mismatch against any non-empty stored subject_type and reject
+        // the receipt. Because claims are permanent (the logical key is spent),
+        // every SUBSEQUENT event for this subscription would then also reject,
+        // silently freezing billing state behind 200 OK responses.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'trialing',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $this->project('subscription.past_due', 'k1', [
+            'gateway_subscription_id' => 'sub_X',
+            'metadata' => ['subject_type' => '', 'subject_uuid' => null],
+        ]);
+
+        $receipt = $this->receiptFor('paystack', 'k1');
+        self::assertIsArray($receipt);
+        self::assertSame('accepted', $receipt['outcome']);
+        self::assertNotSame('subject_mismatch', $receipt['rejection_code']);
+
+        $row = $this->row();
+        self::assertSame('past_due', $row['status']);
+        self::assertSame(1, $this->eventCount());
+    }
+
+    public function testCreatedResendOnALinkedRowWithMismatchingMetadataRejectsSubjectMismatch(): void
+    {
+        // A subscription.created delivered for a row ALREADY linked by
+        // (gateway, provider_subscription_id) is a resend, not a new-link
+        // attempt -- it goes through the same later-event cross-check as any
+        // other type, not the metadata-driven recovery path.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'active',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $this->project('subscription.created', 'k_resend', [
+            'gateway_subscription_id' => 'sub_X',
+            'status' => 'active',
+            'metadata' => ['tenant_uuid' => 'tenantB'],
+        ]);
+
+        $receipt = $this->receiptFor('paystack', 'k_resend');
+        self::assertIsArray($receipt);
+        self::assertSame('rejected', $receipt['outcome']);
+        self::assertSame('subject_mismatch', $receipt['rejection_code']);
+
+        $row = $this->row();
+        self::assertSame('active', $row['status']);
+        self::assertSame('sub_X', $row['provider_subscription_id']);
+        self::assertSame(0, $this->eventCount());
     }
 
     public function testUnmappedGatewaySubscriptionIdRejectsWithoutTouchingState(): void
