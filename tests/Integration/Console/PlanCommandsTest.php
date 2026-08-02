@@ -22,6 +22,10 @@ final class PlanCommandsTest extends SubscriptionsTestCase
     {
         parent::setUp();
 
+        // The plan commands (create/update/archive/list/import-config) drive the
+        // platform catalog themselves; start from an empty table.
+        $this->clearPlatformPlans();
+
         $this->bind(PlanManagementService::class, new PlanManagementService(
             $this->appContext(),
             new SubscriptionPlanRepository(),

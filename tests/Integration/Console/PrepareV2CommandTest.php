@@ -9,12 +9,12 @@ use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Tests\Support\CapturingLogger;
-use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\LegacySchemaTestCase;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 
-final class PrepareV2CommandTest extends SubscriptionsTestCase
+final class PrepareV2CommandTest extends LegacySchemaTestCase
 {
     private CapturingLogger $recordingAudit;
 
@@ -55,12 +55,12 @@ final class PrepareV2CommandTest extends SubscriptionsTestCase
         // Config plans imported (create-missing): free + pro now DB rows.
         foreach (['free', 'pro'] as $key) {
             self::assertNotNull(
-                (new SubscriptionPlanRepository())->findByKey($this->context, $key),
+                (new SubscriptionPlanRepository())->findByKeyUnscoped($this->context, $key),
                 "config plan {$key} not imported"
             );
         }
         // Dangling key synthesized as archived, empty entitlements.
-        $legacy = (new SubscriptionPlanRepository())->findByKey($this->context, 'legacy-gold');
+        $legacy = (new SubscriptionPlanRepository())->findByKeyUnscoped($this->context, 'legacy-gold');
         self::assertSame('archived', $legacy['status']);
         self::assertSame([], $legacy['entitlements']); // repository rows are already decoded
 
@@ -97,8 +97,8 @@ final class PrepareV2CommandTest extends SubscriptionsTestCase
         $exit = $this->runPrepare();
         self::assertNotSame(0, $exit);
         self::assertCount(0, db($this->context)->table('subscription_v2_preparation')->get());
-        self::assertNull((new SubscriptionPlanRepository())->findByKey($this->context, 'free'));
-        self::assertNull((new SubscriptionPlanRepository())->findByKey($this->context, 'pro'));
+        self::assertNull((new SubscriptionPlanRepository())->findByKeyUnscoped($this->context, 'free'));
+        self::assertNull((new SubscriptionPlanRepository())->findByKeyUnscoped($this->context, 'pro'));
         self::assertSame([], $this->recordingAudit->records());
     }
 

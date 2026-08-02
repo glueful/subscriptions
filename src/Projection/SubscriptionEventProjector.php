@@ -9,6 +9,7 @@ use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Subject;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -65,9 +66,17 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
         try {
             db($this->context)->transaction(
                 function () use ($sub, $changes, $gateway, $logicalKey, $from, $to, $type, $normalized): void {
+                    // The event and the projected write both belong to the SUBJECT that
+                    // owns the mapped row -- a workspace subscription and a user
+                    // membership can share a tenant_uuid, so neither may be addressed by
+                    // tenant alone.
+                    $subject = $this->subjectOf($sub);
+
                     // (1) CLAIM -- throws on (provider_gateway, provider_logical_event_key) duplicate.
                     $this->events->insertOrThrow($this->context, [
-                        'tenant_uuid' => (string) $sub['tenant_uuid'],
+                        'tenant_uuid' => $subject->tenantUuid,
+                        'subject_type' => $subject->type,
+                        'subject_uuid' => $subject->uuid,
                         'type' => $type,
                         'from_status' => $from,
                         'to_status' => $to,
@@ -79,7 +88,7 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
 
                     // (2) PROJECT -- only the claim winner reaches here.
                     if ($changes !== []) {
-                        $this->subscriptions->updateByTenant($this->context, (string) $sub['tenant_uuid'], $changes);
+                        $this->subscriptions->updateBySubject($this->context, $subject, $changes);
                     }
                 }
             );
@@ -99,6 +108,25 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             }
             throw $e;
         }
+    }
+
+    /**
+     * The stored subject triple of a mapped subscription row. Read straight off the
+     * row and never defaulted: since 2.0 the row itself is the authority on which
+     * subject owns it, and re-deriving a missing value from tenant_uuid would file
+     * the event under the wrong subject. A row that somehow lacks the triple
+     * produces an empty one and is rejected at the event repository's coherence
+     * boundary instead.
+     *
+     * @param array<string,mixed> $sub
+     */
+    private function subjectOf(array $sub): Subject
+    {
+        return new Subject(
+            (string) ($sub['tenant_uuid'] ?? ''),
+            (string) ($sub['subject_type'] ?? ''),
+            (string) ($sub['subject_uuid'] ?? ''),
+        );
     }
 
     /**

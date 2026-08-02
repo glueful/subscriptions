@@ -9,23 +9,20 @@ use Glueful\Extensions\Subscriptions\Subject;
 
 final class OverrideRepository
 {
-    /** @return array<string,mixed> */
+    /**
+     * 1.x facade: the workspace's OWN overrides (tenant self-subject). Delegating to
+     * the subject finder is what keeps user-membership overrides out of the tenant
+     * entitlement map -- spec §5, "two entry points, never crossed".
+     *
+     * @return array<string,mixed>
+     */
     public function activeForTenant(ApplicationContext $context, string $tenantUuid): array
     {
-        $now = db($context)->getDriver()->formatDateTime();
-        $rows = db($context)->table('subscription_overrides')
-            ->where('tenant_uuid', '=', $tenantUuid)
-            ->whereRaw('(expires_at IS NULL OR expires_at > ?)', [$now])
-            ->get();
-
-        return $this->collect($rows);
+        return $this->activeForSubject($context, Subject::tenant($tenantUuid));
     }
 
     /**
-     * Subject-aware finder (Task 6): triple match on (tenant_uuid, subject_type,
-     * subject_uuid). Added alongside the byte-compatible activeForTenant() above --
-     * Task 9 switches activeForTenant() to a Subject::tenant() delegate at the
-     * coordinated activation boundary.
+     * Subject-aware finder: triple match on (tenant_uuid, subject_type, subject_uuid).
      *
      * @return array<string,mixed>
      */

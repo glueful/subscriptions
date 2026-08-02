@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 
 use Glueful\Helpers\Utils;
-use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\LegacySchemaTestCase;
 use PDO;
 
-final class MigrationsTest extends SubscriptionsTestCase
+final class MigrationsTest extends LegacySchemaTestCase
 {
     public function testTablesExist(): void
     {

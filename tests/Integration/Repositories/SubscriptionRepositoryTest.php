@@ -52,6 +52,8 @@ final class SubscriptionRepositoryTest extends SubscriptionsTestCase
         $this->connection()->table('subscription_overrides')->insert([
             'uuid' => Utils::generateNanoID(12),
             'tenant_uuid' => 'tenantA',
+            'subject_type' => 'tenant',
+            'subject_uuid' => 'tenantA',
             'entitlement' => 'projects.limit',
             'value' => json_encode(999, JSON_THROW_ON_ERROR),
             'expires_at' => null,
@@ -59,6 +61,8 @@ final class SubscriptionRepositoryTest extends SubscriptionsTestCase
         $this->connection()->table('subscription_overrides')->insert([
             'uuid' => Utils::generateNanoID(12),
             'tenant_uuid' => 'tenantA',
+            'subject_type' => 'tenant',
+            'subject_uuid' => 'tenantA',
             'entitlement' => 'reports.export',
             'value' => json_encode(true, JSON_THROW_ON_ERROR),
             'expires_at' => '2020-01-01 00:00:00',

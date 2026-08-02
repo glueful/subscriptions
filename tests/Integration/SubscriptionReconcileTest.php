@@ -8,6 +8,7 @@ use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\Tests\Support\CallablePuller;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
@@ -26,6 +27,7 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
             new SubscriptionEventRepository(),
             PlanCatalog::fromContext($this->appContext()),
             $this->appContext(),
+            new DefaultSubjectResolver(),
             $puller === null ? null : new CallablePuller($puller),
         );
     }
@@ -205,6 +207,7 @@ final class SubscriptionReconcileTest extends SubscriptionsTestCase
             new SubscriptionEventRepository(),
             PlanCatalog::fromContext($this->appContext()),
             $this->appContext(),
+            new DefaultSubjectResolver(),
             $puller,
         );
         $row = $service->reconcile('tenantA');

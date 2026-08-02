@@ -12,6 +12,7 @@ use Glueful\Extensions\Subscriptions\Bridge\PayviaProviderStatePuller;
 use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
+use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
@@ -24,6 +25,7 @@ use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
 use Psr\Container\ContainerInterface;
@@ -73,6 +75,15 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             PlanCatalog::class => [
                 'factory' => [self::class, 'makePlanCatalog'],
                 'shared' => true,
+            ],
+            // The ONLY seam through which host identity knowledge enters the engine
+            // (spec §4). The shipped default rejects every user subject, so
+            // memberships stay inert until a host REBINDS this to a resolver that
+            // can vouch for users -- binding the resolver is enabling memberships.
+            SubjectResolverInterface::class => [
+                'class' => DefaultSubjectResolver::class,
+                'shared' => true,
+                'autowire' => true,
             ],
             SubscriptionRepository::class => [
                 'class' => SubscriptionRepository::class,
@@ -206,6 +217,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             $c->get(SubscriptionEventRepository::class),
             $c->get(PlanCatalog::class),
             $c->get(ApplicationContext::class),
+            $c->get(SubjectResolverInterface::class),
             $puller,
         );
     }

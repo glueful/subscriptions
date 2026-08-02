@@ -9,22 +9,20 @@ use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Task 8: PlanController stays pinned to the platform scope ('tenant', '') only --
- * it gains no new params, and no HTTP request can cause it to target a workspace
- * scope, even by smuggling 'audience'/'owner_tenant_uuid' into the write body. Its
- * index()/show()/update()/archive() actions still call the unscoped 1.x
- * PlanManagementService methods (byte-identical per this task's pin, and required
- * so the controller keeps working against pre-migration-006 schemas); those
- * unscoped reads not filtering by scope is a known, explicitly deferred limitation
- * that Task 9's coordinated cutover closes by switching them to platform-scope
- * delegates. Runs on the post-006 V2SubscriptionsTestCase harness.
+ * PlanController stays pinned to the platform scope ('tenant', '') only -- it
+ * gains no new params, and no HTTP request can cause it to target a workspace
+ * scope, either by smuggling 'audience'/'owner_tenant_uuid' into a write body or
+ * by naming a plan key that also exists in a workspace catalog. The latter WAS a
+ * real hole: index()/show()/update()/archive() call the unqualified
+ * PlanManagementService methods, which were unscoped before the 2.0 activation
+ * turned them into platform-scope delegates.
  */
-final class PlanControllerScopeTest extends V2SubscriptionsTestCase
+final class PlanControllerScopeTest extends SubscriptionsTestCase
 {
     private PlanManagementService $plans;
     private PlanController $controller;
@@ -97,5 +95,64 @@ final class PlanControllerScopeTest extends V2SubscriptionsTestCase
         $decoded = json_decode((string) $response->getContent(), true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * REGRESSION (carried finding). `PATCH /subscriptions/plans/pro` used to reach
+     * the unscoped `updateByKey()` and mutate EVERY row keyed 'pro' -- including a
+     * workspace-owned membership plan the platform administrator has no authority
+     * over. The controller is unchanged; the delegation underneath it is what
+     * closes this.
+     */
+    public function testPatchNeverReachesASameKeyedWorkspacePlan(): void
+    {
+        $workspace = $this->plans->createInScope('user', 'workspace-1', [
+            'plan_key' => 'pro',
+            'display_name' => 'Workspace Pro',
+            'entitlements' => ['posts.premium' => true],
+            'status' => 'active',
+        ]);
+
+        $request = Request::create(
+            '/subscriptions/plans/pro',
+            'PATCH',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json'],
+            json_encode(['display_name' => 'Platform Pro', 'status' => 'archived'], JSON_THROW_ON_ERROR)
+        );
+
+        $response = $this->controller->update($request, 'pro');
+        self::assertSame(200, $response->getStatusCode());
+
+        $platform = $this->plans->findInScope('tenant', '', 'pro');
+        self::assertSame('Platform Pro', $platform['display_name']);
+        self::assertSame('archived', $platform['status']);
+
+        $untouched = $this->plans->findInScope('user', 'workspace-1', 'pro');
+        self::assertSame($workspace['uuid'], $untouched['uuid']);
+        self::assertSame('Workspace Pro', $untouched['display_name']);
+        self::assertSame('active', $untouched['status']);
+        self::assertSame(['posts.premium' => true], $untouched['entitlements']);
+    }
+
+    public function testIndexAndShowNeverExposeWorkspacePlans(): void
+    {
+        $this->plans->createInScope('user', 'workspace-1', [
+            'plan_key' => 'members-only',
+            'display_name' => 'Members Only',
+            'entitlements' => ['posts.premium' => true],
+            'status' => 'active',
+        ]);
+
+        $listed = array_column(
+            $this->json($this->controller->index(Request::create('/subscriptions/plans')))['data']['plans'],
+            'plan_key'
+        );
+        self::assertNotContains('members-only', $listed);
+
+        $show = $this->controller->show(Request::create('/subscriptions/plans/members-only'), 'members-only');
+        self::assertSame(404, $show->getStatusCode());
     }
 }

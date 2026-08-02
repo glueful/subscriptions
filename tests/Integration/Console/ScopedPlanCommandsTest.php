@@ -12,17 +12,17 @@ use Glueful\Extensions\Subscriptions\Console\Plans\UpdatePlanCommand;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 
 /**
  * Task 8: `plans:*` console commands gain `--audience=`/`--owner=` options,
  * defaulting to the platform scope ('tenant', ''). Runs on the post-006
- * V2SubscriptionsTestCase harness. The untouched, no-option PlanCommandsTest
+ * SubscriptionsTestCase harness. The untouched, no-option PlanCommandsTest
  * (shared 1.x harness) proves the no-option path stays byte-identical.
  */
-final class ScopedPlanCommandsTest extends V2SubscriptionsTestCase
+final class ScopedPlanCommandsTest extends SubscriptionsTestCase
 {
     protected function setUp(): void
     {
@@ -120,7 +120,7 @@ final class ScopedPlanCommandsTest extends V2SubscriptionsTestCase
 
         self::assertSame(Command::SUCCESS, $exit);
         self::assertSame('Workspace Pro', $this->scopedPlan('pro', 'user', 'workspace-1')['display_name']);
-        // The platform 'pro' plan (seeded by V2SubscriptionsTestCase) is untouched.
+        // The platform 'pro' plan (seeded by SubscriptionsTestCase) is untouched.
         self::assertSame('Pro', $this->scopedPlan('pro', 'tenant', '')['display_name']);
     }
 

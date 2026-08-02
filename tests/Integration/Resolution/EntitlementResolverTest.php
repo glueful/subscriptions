@@ -23,16 +23,15 @@ final class EntitlementResolverTest extends SubscriptionsTestCase
         'api.monthly' => 100000,
     ];
 
+    /**
+     * The DB-authoritative platform catalog. The harness seeds 'free'/'pro' from
+     * config/subscriptions.php, so the FREE/PRO constants above still describe the
+     * catalog exactly -- what changed is that they now come from real plan rows
+     * rather than a config overlay.
+     */
     private function catalog(): PlanCatalog
     {
-        return new PlanCatalog([
-            'default_plan' => 'free',
-            'plans' => [
-                'free' => ['entitlements' => self::FREE],
-                'pro' => ['entitlements' => self::PRO],
-            ],
-            'grace_days' => 3,
-        ]);
+        return PlanCatalog::fromContext($this->appContext());
     }
 
     private function resolver(?CacheStore $cache = null, bool $cacheEnabled = false): EntitlementResolver
@@ -54,6 +53,8 @@ final class EntitlementResolverTest extends SubscriptionsTestCase
         $this->connection()->table('subscription_overrides')->insert(array_merge([
             'uuid' => Utils::generateNanoID(12),
             'tenant_uuid' => 'tenantA',
+            'subject_type' => 'tenant',
+            'subject_uuid' => 'tenantA',
             'expires_at' => null,
         ], $row, ['value' => json_encode($row['value'], JSON_THROW_ON_ERROR)]));
     }

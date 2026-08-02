@@ -4,16 +4,15 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
- * Smoke test for the isolated v2 harness (Task 5, spec §3.3): proves 006 is
- * applied, the platform catalog is seeded, and seedSubscription() writes a
- * coherent subject triple + resolved plan_uuid for both tenant and user
- * subjects. Tasks 6-8 build their own tests on V2SubscriptionsTestCase; this
- * one only guards the harness itself.
+ * Guards the SHARED harness itself: migration 006 applied, the platform catalog
+ * seeded, and seedSubscription() writing a coherent subject triple + resolved
+ * plan_uuid for both tenant and user subjects. Every other integration test
+ * silently depends on all of that.
  */
-final class V2SubscriptionsTestCaseSmokeTest extends V2SubscriptionsTestCase
+final class SubscriptionsTestCaseSmokeTest extends SubscriptionsTestCase
 {
     public function testSubjectModelIsAppliedAndPlatformCatalogIsSeeded(): void
     {

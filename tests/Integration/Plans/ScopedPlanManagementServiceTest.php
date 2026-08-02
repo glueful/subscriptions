@@ -7,17 +7,15 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration\Plans;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
- * Task 8: the five exact scope-aware host-facing methods on PlanManagementService
- * (createInScope/updateInScope/archiveInScope/findInScope/listInScope), on the
- * post-006 V2SubscriptionsTestCase harness. The unscoped create/update/archive/
- * find/list/importConfig methods keep their 1.x behavior unchanged through this
- * task (covered separately by the untouched PlanManagementServiceTest on the
- * shared 1.x harness) -- Task 9 performs the coordinated cutover.
+ * The five scope-aware host-facing methods on PlanManagementService
+ * (createInScope/updateInScope/archiveInScope/findInScope/listInScope), plus the
+ * cross-scope isolation the 2.0 activation added by turning the unqualified
+ * create/update/archive/find/list into platform-scope delegates of these.
  */
-final class ScopedPlanManagementServiceTest extends V2SubscriptionsTestCase
+final class ScopedPlanManagementServiceTest extends SubscriptionsTestCase
 {
     private PlanManagementService $service;
 
@@ -84,7 +82,7 @@ final class ScopedPlanManagementServiceTest extends V2SubscriptionsTestCase
 
     public function testCreateInScopeAllowsSameKeyAcrossDifferentScopesWithoutCollision(): void
     {
-        // 'pro' already exists in the platform scope (seeded by V2SubscriptionsTestCase).
+        // 'pro' already exists in the platform scope (seeded by SubscriptionsTestCase).
         $row = $this->service->createInScope('user', 'workspace-1', $this->payload('pro'));
 
         self::assertSame('pro', $row['plan_key']);
@@ -203,5 +201,63 @@ final class ScopedPlanManagementServiceTest extends V2SubscriptionsTestCase
         $this->expectException(\InvalidArgumentException::class);
 
         $this->service->archiveInScope('bogus', '', 'pro');
+    }
+
+    // ---------------------------------------------------------------
+    // Cross-scope isolation (regression, carried finding from Task 8)
+    // ---------------------------------------------------------------
+
+    /**
+     * REGRESSION. Before the 2.0 activation the unqualified update() reached the
+     * unscoped `updateByKey()` -- `WHERE plan_key = ?` with no scope predicate.
+     * Migration 006 had already replaced UNIQUE(plan_key) with
+     * UNIQUE(audience, owner_tenant_uuid, plan_key), so a platform-scope PATCH of
+     * 'pro' silently mutated a same-keyed WORKSPACE plan too. Now update() is
+     * updateInScope('tenant', '', ...) and cannot reach across scopes.
+     */
+    public function testPlatformUpdateLeavesASameKeyedWorkspacePlanUntouched(): void
+    {
+        // Platform 'pro' comes from the harness's seeded catalog.
+        $workspace = $this->service->createInScope('user', 'workspace-1', $this->payload('pro'));
+
+        $this->service->update('pro', ['display_name' => 'Platform Pro', 'status' => 'archived']);
+
+        $platformRow = $this->service->findInScope('tenant', '', 'pro');
+        self::assertSame('Platform Pro', $platformRow['display_name']);
+        self::assertSame('archived', $platformRow['status']);
+
+        $workspaceRow = $this->service->findInScope('user', 'workspace-1', 'pro');
+        self::assertSame($workspace['uuid'], $workspaceRow['uuid']);
+        self::assertSame('Pro', $workspaceRow['display_name']);
+        self::assertSame('active', $workspaceRow['status']);
+        self::assertSame(['projects.limit' => 5], $workspaceRow['entitlements']);
+    }
+
+    public function testPlatformArchiveLeavesASameKeyedWorkspacePlanUntouched(): void
+    {
+        $this->service->createInScope('user', 'workspace-1', $this->payload('pro'));
+
+        $this->service->archive('pro');
+
+        self::assertSame('archived', $this->service->findInScope('tenant', '', 'pro')['status']);
+        self::assertSame('active', $this->service->findInScope('user', 'workspace-1', 'pro')['status']);
+    }
+
+    public function testPlatformReadsNeverSeeWorkspacePlans(): void
+    {
+        $this->service->createInScope('user', 'workspace-1', $this->payload('members-only'));
+
+        self::assertNull($this->service->find('members-only'));
+        self::assertNotContains('members-only', array_column($this->service->list(), 'plan_key'));
+    }
+
+    public function testPlatformCreateIsNotBlockedByASameKeyedWorkspacePlan(): void
+    {
+        $this->service->createInScope('user', 'workspace-1', $this->payload('growth'));
+
+        $row = $this->service->create($this->payload('growth'));
+
+        self::assertSame('tenant', $row['audience']);
+        self::assertSame('', $row['owner_tenant_uuid']);
     }
 }

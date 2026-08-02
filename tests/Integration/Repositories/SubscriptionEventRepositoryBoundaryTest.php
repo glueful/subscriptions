@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Tests\Integration\Repositories;
 
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
  * Task 6: repository-boundary validation on SubscriptionEventRepository::insertOrThrow().
@@ -14,16 +14,12 @@ use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
  * tenant|user; a tenant subject requires subject_uuid === tenant_uuid. Malformed events
  * throw InvalidArgumentException and never reach subscription_events.
  *
- * Legacy-compat decision (documented in the task-6 report): the 1.x call sites
- * (SubscriptionService, SubscriptionEventProjector, and the pre-v2 event fixtures) insert
- * events carrying only tenant_uuid, with no subject_type/subject_uuid key at all -- Task 9
- * is the coordinated cutover that teaches those callers to pass an explicit Subject. Until
- * then, insertOrThrow() derives a coherent tenant self-subject (subject_type='tenant',
- * subject_uuid=tenant_uuid) whenever the caller omitted -- or passed empty -- those two
- * columns, BEFORE running the coherence check below. This keeps every legacy call site
- * satisfying the new validation without changing in this task.
+ * The Task-6 legacy-compat derivation is RETIRED as of the 2.0 activation: every
+ * caller (SubscriptionService, SubscriptionEventProjector, and the fixtures) now
+ * passes the subject triple explicitly, so a tenant-only event is a bug rather than
+ * a legacy shape and is rejected here instead of being silently repaired.
  */
-final class SubscriptionEventRepositoryBoundaryTest extends V2SubscriptionsTestCase
+final class SubscriptionEventRepositoryBoundaryTest extends SubscriptionsTestCase
 {
     private SubscriptionEventRepository $repo;
 
@@ -38,6 +34,8 @@ final class SubscriptionEventRepositoryBoundaryTest extends V2SubscriptionsTestC
     {
         return array_merge([
             'tenant_uuid' => 'tenantA',
+            'subject_type' => 'tenant',
+            'subject_uuid' => 'tenantA',
             'type' => 'subscription.past_due',
             'source' => 'provider_event',
             'provider_gateway' => 'paystack',
@@ -50,7 +48,25 @@ final class SubscriptionEventRepositoryBoundaryTest extends V2SubscriptionsTestC
         return count($this->connection()->table('subscription_events')->get());
     }
 
-    public function testLegacyShapedEventWithNoSubjectColumnsDerivesACoherentTenantSelfSubject(): void
+    public function testEventWithNoSubjectColumnsAtAllIsRejectedAndNeverReachesSql(): void
+    {
+        // FLIPPED at the 2.0 activation: this shape used to be derived into a
+        // coherent tenant self-subject. Deriving it now would mask a caller that
+        // simply forgot the subject -- and for a user-subject caller it would
+        // silently file the event under the WRONG subject.
+        $event = $this->event();
+        unset($event['subject_type'], $event['subject_uuid']);
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        try {
+            $this->repo->insertOrThrow($this->appContext(), $event);
+        } finally {
+            self::assertSame(0, $this->eventCount());
+        }
+    }
+
+    public function testExplicitCoherentTenantSubjectIsPersistedVerbatim(): void
     {
         $this->repo->insertOrThrow($this->appContext(), $this->event());
 
@@ -113,22 +129,19 @@ final class SubscriptionEventRepositoryBoundaryTest extends V2SubscriptionsTestC
     }
 
     /**
-     * Regression (code review): the legacy-compat derivation must be applied as ONE
-     * atomic pair, not independently per key. A caller passing an explicit
-     * subject_type='user' with subject_uuid omitted is NOT the legacy tenant-only
-     * shape -- deriving subject_uuid alone from tenant_uuid there would manufacture a
-     * coherent-looking "user" identity (subject_uuid defaulting to the TENANT's uuid)
-     * that only accidentally passes, since the tenant/uuid-match check only fires for
-     * subject_type=tenant. This must be rejected, not silently repaired.
+     * A half-specified user subject stays rejected: an explicit
+     * subject_type='user' whose subject_uuid is nulled out must never fall back to
+     * the tenant's own uuid, which would manufacture a coherent-looking but wrong
+     * "user" identity (the tenant/uuid-match check only fires for subject_type=tenant).
      */
-    public function testPartiallyDerivedUserSubjectWithMissingUuidThrowsAndNeverReachesSql(): void
+    public function testPartiallySpecifiedUserSubjectWithMissingUuidThrowsAndNeverReachesSql(): void
     {
         $this->expectException(\InvalidArgumentException::class);
 
         try {
             $this->repo->insertOrThrow($this->appContext(), $this->event([
                 'subject_type' => 'user',
-                // subject_uuid intentionally omitted.
+                'subject_uuid' => null,
             ]));
         } finally {
             self::assertSame(0, $this->eventCount());

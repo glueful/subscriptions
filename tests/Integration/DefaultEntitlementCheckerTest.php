@@ -21,30 +21,21 @@ final class DefaultEntitlementCheckerTest extends SubscriptionsTestCase
     {
         parent::setUp();
 
-        $catalog = new PlanCatalog([
-            'default_plan' => 'free',
-            'plans' => [
-                'free' => [
-                    'entitlements' => ['reports.export' => false, 'projects.limit' => 3],
-                ],
-                'pro' => [
-                    'entitlements' => [
-                        'reports.export' => true,
-                        'projects.limit' => 50,
-                        'api.monthly' => 100000,
-                        'support.priority' => true,
-                        'storage.gb' => null, // explicit unlimited -- distinct from absent
-                    ],
-                ],
-                'zero' => [
-                    'entitlements' => ['projects.limit' => 0],
-                ],
-                'negative' => [
-                    'entitlements' => ['projects.limit' => -5],
-                ],
-            ],
-            'grace_days' => 3,
+        // The catalog is DB-authoritative since 2.0, so this suite's fixture plans
+        // are real platform rows rather than a config overlay.
+        $this->clearPlatformPlans();
+        $this->seedPlan('free', ['reports.export' => false, 'projects.limit' => 3]);
+        $this->seedPlan('pro', [
+            'reports.export' => true,
+            'projects.limit' => 50,
+            'api.monthly' => 100000,
+            'support.priority' => true,
+            'storage.gb' => null, // explicit unlimited -- distinct from absent
         ]);
+        $this->seedPlan('zero', ['projects.limit' => 0]);
+        $this->seedPlan('negative', ['projects.limit' => -5]);
+
+        $catalog = PlanCatalog::fromContext($this->appContext());
 
         $resolver = new EntitlementResolver(
             $catalog,
@@ -152,11 +143,28 @@ final class DefaultEntitlementCheckerTest extends SubscriptionsTestCase
         self::assertSame(0, $this->checker->limit('proT', 'projects.limit'));
     }
 
+    /** @param array<string,mixed> $entitlements */
+    private function seedPlan(string $planKey, array $entitlements): void
+    {
+        $this->connection()->table('subscription_plans')->insert([
+            'uuid' => str_pad('plan' . $planKey, 12, '0'),
+            'plan_key' => $planKey,
+            'display_name' => ucfirst($planKey),
+            'entitlements' => json_encode($entitlements, JSON_THROW_ON_ERROR),
+            'status' => 'active',
+            'sort_order' => 0,
+            'audience' => 'tenant',
+            'owner_tenant_uuid' => '',
+        ]);
+    }
+
     private function seedOverride(string $tenantUuid, string $entitlement, mixed $value): void
     {
         $this->connection()->table('subscription_overrides')->insert([
             'uuid' => \Glueful\Helpers\Utils::generateNanoID(12),
             'tenant_uuid' => $tenantUuid,
+            'subject_type' => 'tenant',
+            'subject_uuid' => $tenantUuid,
             'entitlement' => $entitlement,
             'value' => json_encode($value, JSON_THROW_ON_ERROR),
             'expires_at' => null,

@@ -9,20 +9,22 @@ use Glueful\Extensions\Subscriptions\Subject;
 
 final class SubscriptionRepository
 {
-    /** @return array<string,mixed>|null */
+    /**
+     * 1.x facade: the workspace's OWN subscription, i.e. the tenant self-subject
+     * (tenant_uuid, 'tenant', tenant_uuid). Since 2.0 a tenant can also hold user
+     * membership rows, so an unscoped `WHERE tenant_uuid = ?` would be ambiguous --
+     * this delegates to the subject finder instead.
+     *
+     * @return array<string,mixed>|null
+     */
     public function findByTenant(ApplicationContext $context, string $tenantUuid): ?array
     {
-        return db($context)->table('subscriptions')
-            ->where('tenant_uuid', '=', $tenantUuid)
-            ->limit(1)
-            ->first();
+        return $this->findBySubject($context, Subject::tenant($tenantUuid));
     }
 
     /**
-     * Subject-aware finder (Task 6): triple match on (tenant_uuid, subject_type,
-     * subject_uuid). Added alongside the byte-compatible findByTenant() above --
-     * Task 9 switches findByTenant() to a Subject::tenant() delegate at the
-     * coordinated activation boundary.
+     * Subject-aware finder: triple match on (tenant_uuid, subject_type, subject_uuid),
+     * which is exactly the `uniq_subscriptions_subject` unique -- at most one row.
      *
      * @return array<string,mixed>|null
      */
@@ -55,20 +57,21 @@ final class SubscriptionRepository
         db($context)->table('subscriptions')->insert($this->normalizeJson($data));
     }
 
-    /** @param array<string,mixed> $changes */
+    /**
+     * 1.x facade: updates the workspace's OWN subscription only. Delegating to the
+     * subject updater is what keeps a workspace write from sweeping every user
+     * membership row that shares its tenant_uuid.
+     *
+     * @param array<string,mixed> $changes
+     */
     public function updateByTenant(ApplicationContext $context, string $tenantUuid, array $changes): void
     {
-        $changes['updated_at'] = $this->now($context);
-
-        db($context)->table('subscriptions')
-            ->where('tenant_uuid', '=', $tenantUuid)
-            ->update($this->normalizeJson($changes));
+        $this->updateBySubject($context, Subject::tenant($tenantUuid), $changes);
     }
 
     /**
-     * Subject-aware updater (Task 6): triple match, added alongside the
-     * byte-compatible updateByTenant() above -- Task 9 switches updateByTenant() to a
-     * Subject::tenant() delegate at the coordinated activation boundary.
+     * Subject-aware updater: triple match, so a write can only ever touch the one
+     * row identified by `uniq_subscriptions_subject`.
      *
      * @param array<string,mixed> $changes
      */

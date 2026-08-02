@@ -9,7 +9,7 @@ use Glueful\Extensions\Subscriptions\Database\Migrations\SubjectModel;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
-use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\LegacySchemaTestCase;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 
@@ -19,7 +19,7 @@ use Symfony\Component\Console\Tester\CommandTester;
  * (Task 9's coordinated activation boundary) -- every test here constructs
  * SubjectModel itself and calls up()/down() directly.
  */
-final class SubjectMigrationTest extends SubscriptionsTestCase
+final class SubjectMigrationTest extends LegacySchemaTestCase
 {
     protected function setUp(): void
     {

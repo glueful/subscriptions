@@ -18,6 +18,12 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // This suite drives the platform catalog end to end (including
+        // importConfig, which seeds exactly the keys the harness pre-seeds), so it
+        // starts from an empty table.
+        $this->clearPlatformPlans();
+
         $this->service = new PlanManagementService(
             $this->appContext(),
             new SubscriptionPlanRepository(),

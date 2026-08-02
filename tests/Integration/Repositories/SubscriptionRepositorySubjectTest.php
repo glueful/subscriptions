@@ -6,7 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration\Repositories;
 
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Subject;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
  * Task 6: subject-aware finder/updater added ALONGSIDE the byte-compatible
@@ -14,7 +14,7 @@ use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
  * delegates at the coordinated activation boundary). Runs on the isolated
  * v2 harness (006 applied) so subject_type/subject_uuid are real columns.
  */
-final class SubscriptionRepositorySubjectTest extends V2SubscriptionsTestCase
+final class SubscriptionRepositorySubjectTest extends SubscriptionsTestCase
 {
     private SubscriptionRepository $repo;
 

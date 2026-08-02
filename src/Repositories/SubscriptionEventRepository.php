@@ -14,9 +14,13 @@ use Glueful\Helpers\Utils;
  */
 class SubscriptionEventRepository
 {
-    private ?bool $eventsTableHasSubjectColumns = null;
-
     /**
+     * Every caller passes an EXPLICIT subject triple since the 2.0 activation: the
+     * transitional tenant-only derivation (and the pre-006 hasColumn() sniff that
+     * stripped the subject columns before the insert) are both retired -- the
+     * subject columns always exist, and an event with no subject is a bug, not a
+     * legacy shape.
+     *
      * @param array<string,mixed> $event
      * @throws \InvalidArgumentException when the event's subject identity is incoherent
      *         (repository-boundary coherence check only -- host existence remains
@@ -26,53 +30,13 @@ class SubscriptionEventRepository
     {
         $row = array_merge(['uuid' => Utils::generateNanoID(12)], $event);
 
-        // Legacy-compat (Task 6, until Task 9's coordinated cutover): the 1.x call sites
-        // (SubscriptionService, SubscriptionEventProjector) and pre-v2 event fixtures
-        // insert tenant-only events that carry NO subject_type/subject_uuid key at all --
-        // both keys absent (or explicitly null) is read as "caller has no concept of
-        // subjects yet" and gets a derived coherent tenant self-subject, applied as ONE
-        // atomic pair. If only ONE of the two is absent/null -- e.g. an explicit
-        // subject_type='user' with subject_uuid omitted -- that is a real, incoherent
-        // shape, not a legacy-shaped event: it must NOT be partially derived (deriving
-        // subject_uuid alone from tenant_uuid there would manufacture a coherent-looking
-        // but wrong "user" identity that only the tenant/uuid-match branch below would
-        // have caught). The row is left as-is so the coherence check rejects it, same as
-        // an explicitly passed empty string.
-        if (
-            (!array_key_exists('subject_type', $row) || $row['subject_type'] === null)
-            && (!array_key_exists('subject_uuid', $row) || $row['subject_uuid'] === null)
-        ) {
-            $row['subject_type'] = SubjectType::TENANT;
-            $row['subject_uuid'] = $row['tenant_uuid'] ?? '';
-        }
-
         $this->assertCoherentIdentity($row);
-
-        // TRANSITIONAL (Task 6, until Task 9's coordinated cutover): the subject_type/
-        // subject_uuid columns only exist once migration 006 has run (the shared 1.x
-        // harness never applies it -- SubscriptionsTestCase stays on the pre-006 schema
-        // by design). On that schema the derived/explicit subject values above exist
-        // purely to satisfy the coherence check and must NOT be written -- the columns
-        // don't exist and the insert would fail with "no such column".
-        if (!$this->eventsTableHasSubjectColumns($context)) {
-            unset($row['subject_type'], $row['subject_uuid']);
-        }
 
         if (isset($row['data']) && is_array($row['data'])) {
             $row['data'] = json_encode($row['data'], JSON_THROW_ON_ERROR);
         }
 
         db($context)->table('subscription_events')->insert($row);
-    }
-
-    private function eventsTableHasSubjectColumns(ApplicationContext $context): bool
-    {
-        if ($this->eventsTableHasSubjectColumns === null) {
-            $this->eventsTableHasSubjectColumns = db($context)->getSchemaBuilder()
-                ->hasColumn('subscription_events', 'subject_type');
-        }
-
-        return $this->eventsTableHasSubjectColumns;
     }
 
     /**

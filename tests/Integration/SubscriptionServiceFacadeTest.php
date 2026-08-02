@@ -9,14 +9,29 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
+use Glueful\Extensions\Subscriptions\Tests\Support\CallablePuller;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
 /**
- * Task 6.2 -- the full no-provider lifecycle (free/trial/comp): every path here
- * runs with no payment-provider class present.
+ * FACADE EQUIVALENCE (spec §11.2): "a 1.x-shaped test copied from the current
+ * suite must pass unmodified against 2.0".
+ *
+ * Every test method below is a VERBATIM copy of a 1.x lifecycle test method as it
+ * stood at the commit before the subject-model activation -- the full
+ * SubscriptionServiceTest lifecycle suite plus the SubscriptionReconcileTest drift
+ * suite. Nothing inside a test body was touched: not an assertion, not a fixture,
+ * not a plan key. Only the construction wiring below differs, because the
+ * constructor gained the SubjectResolverInterface seam.
+ *
+ * (The one 1.x method deliberately not copied is
+ * SubscriptionReconcileTest::testReconcileAppliesDriftFromInterfacePuller, which
+ * builds a SubscriptionService inside its own body -- it is a constructor-seam
+ * test, not a lifecycle test, and it still lives in its original file.)
+ *
+ * DO NOT "improve" this file. Its entire value is that it was not edited.
  */
-final class SubscriptionServiceTest extends SubscriptionsTestCase
+final class SubscriptionServiceFacadeTest extends SubscriptionsTestCase
 {
     private SubscriptionService $service;
 
@@ -24,12 +39,18 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
     {
         parent::setUp();
 
-        $this->service = new SubscriptionService(
+        $this->service = $this->service();
+    }
+
+    private function service(?callable $puller = null): SubscriptionService
+    {
+        return new SubscriptionService(
             new SubscriptionRepository(),
             new SubscriptionEventRepository(),
             PlanCatalog::fromContext($this->appContext()),
             $this->appContext(),
-            new DefaultSubjectResolver()
+            new DefaultSubjectResolver(),
+            $puller === null ? null : new CallablePuller($puller),
         );
     }
 
@@ -196,6 +217,143 @@ final class SubscriptionServiceTest extends SubscriptionsTestCase
         self::assertIsArray($row);
         self::assertSame('tenantA', $row['tenant_uuid']);
         self::assertSame('free', $row['plan_key']);
+    }
+
+    public function testReconcileWithoutProviderLinkIsNoOp(): void
+    {
+        // Free/comp subscription -- no provider_subscription_id, and NO payvia
+        // installed in this suite: must not throw, must return the row unchanged.
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'free', 'status' => 'active']);
+
+        $row = $this->service()->reconcile('tenantA');
+
+        self::assertIsArray($row);
+        self::assertSame('active', $row['status']);
+        self::assertSame('free', $row['plan_key']);
+        self::assertCount(0, $this->eventsFor('tenantA'));
+    }
+
+    public function testReconcileForUnknownTenantReturnsNull(): void
+    {
+        self::assertNull($this->service()->reconcile('ghost'));
+    }
+
+    public function testReconcileAppliesDriftAndAppendsReconciledEvent(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'active',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $pulled = [];
+        $puller = function (string $gateway, string $gwSubId) use (&$pulled): array {
+            $pulled[] = [$gateway, $gwSubId];
+
+            return ['status' => 'past_due', 'current_period_end' => '2026-06-30 00:00:00'];
+        };
+
+        $row = $this->service($puller)->reconcile('tenantA');
+
+        self::assertSame([['paystack', 'sub_X']], $pulled);
+        self::assertIsArray($row);
+        self::assertSame('past_due', $row['status']);
+        self::assertSame('2026-06-30 00:00:00', $row['current_period_end']);
+
+        $events = $this->eventsFor('tenantA');
+        self::assertCount(1, $events);
+        self::assertSame('reconciled', $events[0]['type']);
+        self::assertSame('reconcile', $events[0]['source']);
+        self::assertNull($events[0]['provider_logical_event_key']);
+        self::assertSame('active', $events[0]['from_status']);
+        self::assertSame('past_due', $events[0]['to_status']);
+    }
+
+    public function testReconcileEnteringPastDueGrantsDunningGrace(): void
+    {
+        // Drifting to past_due must grant the SAME dunning grace the webhook
+        // path grants (now + grace_days) -- not downgrade the tenant instantly.
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'active',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $row = $this->service(static fn(): array => ['status' => 'past_due'])->reconcile('tenantA');
+
+        self::assertIsArray($row);
+        self::assertSame('past_due', $row['status']);
+        self::assertNotEmpty($row['grace_ends_at']);
+
+        // grace_ends_at ~= now + grace_days (3 in the shipped config)
+        $grace = new \DateTimeImmutable((string) $row['grace_ends_at']);
+        $expected = new \DateTimeImmutable('+3 days');
+        self::assertLessThan(120, abs($grace->getTimestamp() - $expected->getTimestamp()));
+    }
+
+    public function testReconcileAlreadyPastDueDoesNotReExtendGrace(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'active',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $service = $this->service(static fn(): array => ['status' => 'past_due']);
+        $service->reconcile('tenantA');
+
+        // Plant a sentinel grace so ANY re-extension (which would recompute
+        // now + grace_days) is observable -- same principle as the listener.
+        $sentinel = '2030-01-01 00:00:00';
+        $this->connection()->table('subscriptions')
+            ->where('tenant_uuid', '=', 'tenantA')
+            ->update(['grace_ends_at' => $sentinel]);
+
+        $row = $service->reconcile('tenantA');
+
+        self::assertIsArray($row);
+        self::assertSame('past_due', $row['status']);
+        self::assertSame($sentinel, $row['grace_ends_at']);
+        self::assertCount(1, $this->eventsFor('tenantA')); // only the first drift
+    }
+
+    public function testReconcileWithNoDriftAppendsNoEvent(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'active',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $row = $this->service(static fn(): array => ['status' => 'active'])->reconcile('tenantA');
+
+        self::assertIsArray($row);
+        self::assertSame('active', $row['status']);
+        self::assertCount(0, $this->eventsFor('tenantA'));
+    }
+
+    public function testReconcilePullerReturningNullIsNoOp(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'status' => 'active',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $row = $this->service(static fn(): ?array => null)->reconcile('tenantA');
+
+        self::assertIsArray($row);
+        self::assertSame('active', $row['status']);
+        self::assertCount(0, $this->eventsFor('tenantA'));
     }
 
     private function seedManagedPlan(string $planKey, string $status): void

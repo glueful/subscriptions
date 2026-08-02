@@ -21,7 +21,9 @@ use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
+use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
@@ -143,6 +145,7 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
     {
         // Give the factories what they pull from the container.
         $this->bind(ApplicationContext::class, $this->appContext());
+        $this->bind(SubjectResolverInterface::class, new DefaultSubjectResolver());
         $this->bind(SubscriptionRepository::class, new SubscriptionRepository());
         $this->bind(OverrideRepository::class, new OverrideRepository());
         $this->bind(SubscriptionEventRepository::class, new SubscriptionEventRepository());

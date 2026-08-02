@@ -5,16 +5,16 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Tests\Integration\Catalog;
 
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
 /**
  * Task 7: the scoped, DB-authoritative PlanCatalog::forScope() path. Runs on the
- * post-006 V2SubscriptionsTestCase harness, which already seeds the platform
+ * post-006 SubscriptionsTestCase harness, which already seeds the platform
  * ('tenant', '') catalog with 'free'/'pro'. fromContext()'s 1.x config-overlay
  * behavior is covered separately by ManagedPlanCatalogTest and is untouched here.
  */
-final class ScopedPlanCatalogTest extends V2SubscriptionsTestCase
+final class ScopedPlanCatalogTest extends SubscriptionsTestCase
 {
     public function testForScopeHasNoConfigOverlay(): void
     {

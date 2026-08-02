@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Tests\Integration\Repositories;
 
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
 /**
@@ -15,7 +15,7 @@ use Glueful\Helpers\Utils;
  * remain untouched through Task 8. Task 9 switches the 1.x names to the
  * platform scope ('tenant', '').
  */
-final class SubscriptionPlanRepositoryScopeTest extends V2SubscriptionsTestCase
+final class SubscriptionPlanRepositoryScopeTest extends SubscriptionsTestCase
 {
     private SubscriptionPlanRepository $repo;
 

@@ -6,14 +6,14 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration\Repositories;
 
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Subject;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 
 /**
  * Task 6: activeForSubject() added alongside the byte-compatible
  * activeForTenant() (Task 9 switches it to a Subject::tenant delegate).
  */
-final class OverrideRepositorySubjectTest extends V2SubscriptionsTestCase
+final class OverrideRepositorySubjectTest extends SubscriptionsTestCase
 {
     private OverrideRepository $repo;
 

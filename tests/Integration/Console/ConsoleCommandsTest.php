@@ -10,6 +10,7 @@ use Glueful\Extensions\Subscriptions\Console\SetPlanCommand;
 use Glueful\Extensions\Subscriptions\Console\ShowSubscriptionCommand;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
@@ -34,7 +35,8 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
             new SubscriptionRepository(),
             new SubscriptionEventRepository(),
             PlanCatalog::fromContext($this->appContext()),
-            $this->appContext()
+            $this->appContext(),
+            new DefaultSubjectResolver()
         ));
     }
 

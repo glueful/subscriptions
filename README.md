@@ -111,20 +111,24 @@ The gate fails closed: no resolvable tenant means 403 unless
 
 ## Plan catalog
 
-The catalog has two sources:
+The catalog has ONE source of truth: managed DB plans in `subscription_plans`.
+`config/subscriptions.php` holds plan SEEDS -- you import them once with
+`php glueful subscriptions:plans:import-config` -- and is **not** a runtime
+fallback. A config plan with no matching DB row does not exist as far as
+resolution, existence, and assignment are concerned.
 
-- Managed DB plans in `subscription_plans`.
-- Config plans in `config/subscriptions.php` as seed/fallback.
+Each catalog is also scoped to one `(audience, owner_tenant_uuid)` pair. The
+platform catalog is `('tenant', '')`; a workspace's membership catalog is
+`('user', <workspace uuid>)`. The same `plan_key` may exist in several scopes and
+they never see each other.
 
-Resolution prefers DB rows with status `active` or `archived`. If a DB row is
-`draft`, it does not resolve and config is used when a config plan with the same
-key exists. If neither source resolves, the entitlement map is empty and every
-key denies.
+Resolution within a scope accepts DB rows with status `active` or `archived`; a
+`draft` row exists but does not resolve. When nothing resolves, the entitlement
+map is empty and every key denies.
 
-An empty `subscription_plans` table is safe: config plans keep working. If a DB
-is wiped, tenants on config-backed keys continue resolving from config; DB-only
-plan keys resolve to an empty map until restored. If migration 004 has not run
-yet, catalog reads catch the missing table and behave as config-only.
+An empty `subscription_plans` table therefore denies everything -- import the
+config seeds after migrating. If the plan table is missing entirely (migration
+004 has not run), catalog reads catch it and behave as an empty catalog.
 
 Plan assignment is stricter than plan resolution:
 
@@ -133,7 +137,7 @@ Plan assignment is stricter than plan resolution:
 | DB `active`        | yes                           | yes                       |
 | DB `archived`      | yes                           | no                        |
 | DB `draft`         | no                            | no                        |
-| config only        | yes                           | yes                       |
+| config only        | no                            | no                        |
 
 Archived is never delete: tenants already on an archived plan keep resolving it.
 Draft is pre-publish only; active and archived plans cannot transition back to
@@ -141,6 +145,8 @@ draft. An empty entitlement map `{}` is valid and means "deny every entitlement
 key."
 
 ### Config seed (config/subscriptions.php)
+
+Seeds only -- import them into the platform catalog to make them resolvable.
 
 ```php
 return [

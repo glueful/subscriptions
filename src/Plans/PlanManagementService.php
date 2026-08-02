@@ -9,8 +9,21 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Helpers\Utils;
 use Psr\Log\LoggerInterface;
 
+/**
+ * Since the 2.0 activation the five unqualified 1.x methods
+ * (create/update/archive/find/list) are PLATFORM-SCOPE DELEGATES of their
+ * `*InScope` siblings -- `createInScope('tenant', '', …)` and so on. That is what
+ * makes a cross-scope clobber structurally impossible: migration 006 replaced
+ * `UNIQUE(plan_key)` with `UNIQUE(audience, owner_tenant_uuid, plan_key)`, so
+ * before the delegation a `PATCH /plans/{key}` through PlanController could reach
+ * the unscoped `updateByKey()` and mutate a same-keyed WORKSPACE row.
+ * `importConfig()` remains platform-only and never gains a scope parameter.
+ */
 final class PlanManagementService
 {
+    private const PLATFORM_AUDIENCE = 'tenant';
+    private const PLATFORM_OWNER = '';
+
     public function __construct(
         private readonly ApplicationContext $context,
         private readonly SubscriptionPlanRepository $plans,
@@ -24,33 +37,7 @@ final class PlanManagementService
      */
     public function create(array $payload): array
     {
-        $validated = $this->validator->validateCreate($payload);
-
-        if ($this->plans->exists($this->context, (string) $validated['plan_key'])) {
-            throw new \InvalidArgumentException("Plan '{$validated['plan_key']}' already exists.");
-        }
-
-        $now = $this->now();
-        $row = array_merge($validated, [
-            'uuid' => Utils::generateNanoID(12),
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        try {
-            $this->plans->insert($this->context, $row);
-        } catch (\Throwable $e) {
-            if ($this->isUniqueViolation($e)) {
-                throw new \InvalidArgumentException("Plan '{$validated['plan_key']}' already exists.", 0, $e);
-            }
-
-            throw $e;
-        }
-
-        $created = $this->findOrFail((string) $validated['plan_key']);
-        $this->emitAudit($this->auditPayload((string) $validated['plan_key'], 'created', [], $created));
-
-        return $created;
+        return $this->createInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $payload);
     }
 
     /**
@@ -59,25 +46,28 @@ final class PlanManagementService
      */
     public function update(string $planKey, array $payload): array
     {
-        return $this->updateWithAction($planKey, $payload, 'updated');
+        return $this->updateInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $planKey, $payload);
     }
 
     /** @return array<string,mixed> */
     public function archive(string $planKey): array
     {
-        return $this->updateWithAction($planKey, ['status' => 'archived'], 'archived');
+        return $this->archiveInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $planKey);
+    }
+
+    /** @return list<array<string,mixed>> */
+    public function list(): array
+    {
+        return $this->listInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER);
+    }
+
+    /** @return array<string,mixed>|null */
+    public function find(string $planKey): ?array
+    {
+        return $this->findInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $planKey);
     }
 
     /**
-     * TRANSITIONAL (Task 8, until Task 9's coordinated cutover): the five scope-aware
-     * host-facing methods below (createInScope/updateInScope/archiveInScope/
-     * findInScope/listInScope) are ADDED alongside the byte-compatible 1.x
-     * create/update/archive/find/list methods above, which keep their unscoped 1.x
-     * behavior unchanged through this task. Task 9 switches the unscoped methods to
-     * platform-scope delegates (`createInScope('tenant', '', ...)` etc.) at the
-     * coordinated activation boundary; `importConfig()` stays platform-only forever
-     * and never gains a scope parameter.
-     *
      * @param array<string,mixed> $payload
      * @return array<string,mixed>
      */
@@ -211,34 +201,12 @@ final class PlanManagementService
     }
 
     /**
-     * @param array<string,mixed> $payload
-     * @return array<string,mixed>
+     * Seeds the PLATFORM catalog from `subscriptions.plans` (spec §10: config plans
+     * are seeds, not a runtime overlay). Platform-only by contract -- workspace
+     * catalogs are never config-derived.
+     *
+     * @return list<array<string,mixed>>
      */
-    private function updateWithAction(string $planKey, array $payload, string $action): array
-    {
-        $audit = null;
-
-        $row = db($this->context)->transaction(function () use ($planKey, $payload, $action, &$audit): array {
-            $before = $this->findOrFail($planKey);
-            $changes = $this->validator->validatePatch($payload, $before);
-            $changes['updated_at'] = $this->now();
-
-            $this->plans->updateByKey($this->context, $planKey, $changes);
-
-            $after = $this->findOrFail($planKey);
-            $audit = $this->auditPayload($planKey, $action, $before, $after);
-
-            return $after;
-        });
-
-        if (is_array($audit)) {
-            $this->emitAudit($audit);
-        }
-
-        return $row;
-    }
-
-    /** @return list<array<string,mixed>> */
     public function importConfig(bool $force = false, string $status = 'active'): array
     {
         $plans = (array) config($this->context, 'subscriptions.plans', []);
@@ -250,7 +218,7 @@ final class PlanManagementService
             }
 
             $payload = $this->validator->validateImportConfigPlan($planKey, $configPlan, $status);
-            $existing = $this->plans->findByKey($this->context, $planKey);
+            $existing = $this->find($planKey);
 
             if ($existing !== null && !$force) {
                 continue;
@@ -266,29 +234,6 @@ final class PlanManagementService
         }
 
         return $imported;
-    }
-
-    /** @return list<array<string,mixed>> */
-    public function list(): array
-    {
-        return $this->plans->list($this->context);
-    }
-
-    /** @return array<string,mixed>|null */
-    public function find(string $planKey): ?array
-    {
-        return $this->plans->findByKey($this->context, $planKey);
-    }
-
-    /** @return array<string,mixed> */
-    private function findOrFail(string $planKey): array
-    {
-        $row = $this->find($planKey);
-        if ($row === null) {
-            throw new \InvalidArgumentException("Plan '{$planKey}' does not exist.");
-        }
-
-        return $row;
     }
 
     private function now(): string
@@ -332,9 +277,9 @@ final class PlanManagementService
 
     /**
      * Defer the emission to Connection::afterCommit(): outside a transaction it
-     * runs immediately, but nested under a caller's outer transaction (e.g. the
-     * subscriptions:prepare-v2 upgrade bridge) it queues until that outer
-     * transaction commits, and is discarded entirely on rollback -- suppressing
+     * runs immediately, but nested under a caller's outer transaction it queues
+     * until that outer transaction commits, and is discarded entirely on rollback
+     * -- suppressing
      * false "plan changed" audits for changes that never actually persisted.
      *
      * @param array<string,mixed> $payload

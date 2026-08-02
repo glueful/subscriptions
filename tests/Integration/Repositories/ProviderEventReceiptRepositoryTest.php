@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Tests\Integration\Repositories;
 
 use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
-use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
+use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
  * Task 6: the provider-event receipt repository (spec §2/§8) backing the
@@ -13,7 +13,7 @@ use Glueful\Extensions\Subscriptions\Tests\Support\V2SubscriptionsTestCase;
  * (provider_gateway, provider_logical_event_key) slot before resolution
  * completes; markAccepted()/markRejected() settle it afterward.
  */
-final class ProviderEventReceiptRepositoryTest extends V2SubscriptionsTestCase
+final class ProviderEventReceiptRepositoryTest extends SubscriptionsTestCase
 {
     private ProviderEventReceiptRepository $repo;
 
