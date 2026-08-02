@@ -112,6 +112,29 @@ final class SubscriptionEventRepositoryBoundaryTest extends V2SubscriptionsTestC
         }
     }
 
+    /**
+     * Regression (code review): the legacy-compat derivation must be applied as ONE
+     * atomic pair, not independently per key. A caller passing an explicit
+     * subject_type='user' with subject_uuid omitted is NOT the legacy tenant-only
+     * shape -- deriving subject_uuid alone from tenant_uuid there would manufacture a
+     * coherent-looking "user" identity (subject_uuid defaulting to the TENANT's uuid)
+     * that only accidentally passes, since the tenant/uuid-match check only fires for
+     * subject_type=tenant. This must be rejected, not silently repaired.
+     */
+    public function testPartiallyDerivedUserSubjectWithMissingUuidThrowsAndNeverReachesSql(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        try {
+            $this->repo->insertOrThrow($this->appContext(), $this->event([
+                'subject_type' => 'user',
+                // subject_uuid intentionally omitted.
+            ]));
+        } finally {
+            self::assertSame(0, $this->eventCount());
+        }
+    }
+
     public function testTenantSubjectWithMismatchedSubjectUuidThrowsAndNeverReachesSql(): void
     {
         $this->expectException(\InvalidArgumentException::class);

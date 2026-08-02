@@ -29,24 +29,31 @@ class SubscriptionEventRepository
         // Legacy-compat (Task 6, until Task 9's coordinated cutover): the 1.x call sites
         // (SubscriptionService, SubscriptionEventProjector) and pre-v2 event fixtures
         // insert tenant-only events that carry NO subject_type/subject_uuid key at all --
-        // an absent (or explicitly null) key is read as "caller has no concept of
-        // subjects yet" and gets a derived coherent tenant self-subject. An explicitly
-        // passed EMPTY STRING is a real (malformed) value and is left alone so the
-        // coherence check below rejects it -- it is not silently repaired.
-        if (!array_key_exists('subject_type', $row) || $row['subject_type'] === null) {
+        // both keys absent (or explicitly null) is read as "caller has no concept of
+        // subjects yet" and gets a derived coherent tenant self-subject, applied as ONE
+        // atomic pair. If only ONE of the two is absent/null -- e.g. an explicit
+        // subject_type='user' with subject_uuid omitted -- that is a real, incoherent
+        // shape, not a legacy-shaped event: it must NOT be partially derived (deriving
+        // subject_uuid alone from tenant_uuid there would manufacture a coherent-looking
+        // but wrong "user" identity that only the tenant/uuid-match branch below would
+        // have caught). The row is left as-is so the coherence check rejects it, same as
+        // an explicitly passed empty string.
+        if (
+            (!array_key_exists('subject_type', $row) || $row['subject_type'] === null)
+            && (!array_key_exists('subject_uuid', $row) || $row['subject_uuid'] === null)
+        ) {
             $row['subject_type'] = SubjectType::TENANT;
-        }
-        if (!array_key_exists('subject_uuid', $row) || $row['subject_uuid'] === null) {
             $row['subject_uuid'] = $row['tenant_uuid'] ?? '';
         }
 
         $this->assertCoherentIdentity($row);
 
-        // The subject_type/subject_uuid columns only exist once migration 006 has run
-        // (the shared 1.x harness never applies it -- SubscriptionsTestCase stays on the
-        // pre-006 schema by design). On that schema the derived/explicit subject values
-        // above exist purely to satisfy the coherence check and must NOT be written --
-        // the columns don't exist and the insert would fail with "no such column".
+        // TRANSITIONAL (Task 6, until Task 9's coordinated cutover): the subject_type/
+        // subject_uuid columns only exist once migration 006 has run (the shared 1.x
+        // harness never applies it -- SubscriptionsTestCase stays on the pre-006 schema
+        // by design). On that schema the derived/explicit subject values above exist
+        // purely to satisfy the coherence check and must NOT be written -- the columns
+        // don't exist and the insert would fail with "no such column".
         if (!$this->eventsTableHasSubjectColumns($context)) {
             unset($row['subject_type'], $row['subject_uuid']);
         }
