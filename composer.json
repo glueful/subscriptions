@@ -23,6 +23,7 @@
         "php": "^8.3"
     },
     "require-dev": {
+        "glueful/extension-contracts": "dev-dev as 1.5.0",
         "glueful/framework": "^1.57.0",
         "phpstan/phpstan": "^1.0",
         "phpunit/phpunit": "^10.5",
@@ -72,5 +73,10 @@
     },
     "config": {
         "sort-packages": true
-    }
+    },
+    "repositories": [{
+        "name": "extension-contracts",
+        "type": "path",
+        "url": "../contracts"
+    }]
 }

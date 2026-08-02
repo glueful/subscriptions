@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Container\Loader\DefaultServicesLoader;
+use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
@@ -27,6 +28,7 @@ use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\SubscriptionsServiceProvider;
+use Glueful\Extensions\Subscriptions\Tests\Support\RecordingTenantTableRegistry;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
@@ -218,5 +220,40 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         self::assertContains(\Glueful\Extensions\Subscriptions\Console\ReconcileCommand::class, $deferred);
         self::assertContains(\Glueful\Extensions\Subscriptions\Console\ShowSubscriptionCommand::class, $deferred);
         self::assertContains(\Glueful\Extensions\Subscriptions\Console\SetPlanCommand::class, $deferred);
+    }
+
+    /**
+     * Task 12 -- spec §9: `subscriptions`, `subscription_overrides`,
+     * `subscription_events` are registered as ordinary tenant-owned tables, outside
+     * any feature gate, WHENEVER a `TenantTableRegistry` is bound. `subscription_plans`
+     * (mixed platform/workspace ownership under a differently-named owner column) and
+     * `subscription_provider_event_receipts` (rejected candidates may carry no valid
+     * tenant) are deliberately never registered.
+     */
+    public function testBootRegistersExactlyTheThreeConventionalTenantTablesWhenARegistryIsBound(): void
+    {
+        $registry = new RecordingTenantTableRegistry();
+        $this->bind(TenantTableRegistry::class, $registry);
+
+        $provider = new SubscriptionsServiceProvider($this->appContext()->getContainer());
+        $provider->boot($this->appContext());
+
+        self::assertSame(
+            ['subscriptions', 'subscription_overrides', 'subscription_events'],
+            $registry->registered()
+        );
+    }
+
+    /**
+     * Mirrors testBootWithPayviaAbsentRegistersNoListenerAndDoesNotThrow(): the harness
+     * container throws on any unknown id, so a clean boot() with NO TenantTableRegistry
+     * bound proves the registration path is skipped via has(), never reaching get().
+     */
+    public function testBootDoesNotThrowWhenNoTenantTableRegistryIsBound(): void
+    {
+        $provider = new SubscriptionsServiceProvider($this->appContext()->getContainer());
+        $provider->boot($this->appContext());
+
+        self::assertTrue(true); // reaching here means boot() degraded gracefully
     }
 }

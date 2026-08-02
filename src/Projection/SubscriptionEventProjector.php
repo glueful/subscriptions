@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
+use Glueful\Extensions\Subscriptions\Lifecycle\TenantIntegration;
 use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
@@ -64,7 +65,20 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     ) {
     }
 
+    /**
+     * Runs entirely through `TenantIntegration::runAsSystemOr()` (spec §9): the
+     * target subscription must be DISCOVERED (by provider gateway/subscription id,
+     * not by tenant) before any tenant context could even be known, so this is
+     * trusted system work, never tenant-scoped work.
+     */
     public function project(ProviderSubscriptionEvent $event): void
+    {
+        TenantIntegration::runAsSystemOr($this->context, function () use ($event): void {
+            $this->projectInTransaction($event);
+        });
+    }
+
+    private function projectInTransaction(ProviderSubscriptionEvent $event): void
     {
         $gateway = $event->gateway;
         $type = $event->type;

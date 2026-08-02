@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Subscriptions;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Cache\CacheStore;
 use Glueful\Database\Migrations\MigrationPriority;
+use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Bridge\PayviaProviderStatePuller;
 use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
@@ -323,6 +324,33 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             }
         } catch (\Throwable $e) {
             error_log('[Subscriptions] Failed to register payvia event bridge: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e; // fail fast in non-production
+            }
+        }
+
+        // Tenant table registration (spec §9): `glueful/extension-contracts` is a
+        // require-dev-only dependency (never a hard one), so this is a SOFT probe --
+        // interface_exists() first (the contracts package may not even be
+        // autoloadable), then the container's own has() before ever calling get().
+        // Registered OUTSIDE any feature gate: exactly the three conventional tenant
+        // tables (subscriptions, subscription_overrides, subscription_events).
+        // subscription_plans (mixed platform/workspace ownership under a
+        // differently-named owner column) and subscription_provider_event_receipts
+        // (rejected candidates may carry no valid tenant) are deliberately NEVER
+        // registered.
+        try {
+            if (interface_exists(TenantTableRegistry::class)) {
+                $container = container($context);
+                if ($container->has(TenantTableRegistry::class)) {
+                    $registry = $container->get(TenantTableRegistry::class);
+                    if ($registry instanceof TenantTableRegistry) {
+                        $registry->register(['subscriptions', 'subscription_overrides', 'subscription_events']);
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log('[Subscriptions] Failed to register tenant tables: ' . $e->getMessage());
             if ($this->bootEnv() !== 'production') {
                 throw $e; // fail fast in non-production
             }
