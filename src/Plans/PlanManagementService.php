@@ -188,16 +188,26 @@ final class PlanManagementService
         return $diff;
     }
 
-    /** @param array<string,mixed> $payload */
+    /**
+     * Defer the emission to Connection::afterCommit(): outside a transaction it
+     * runs immediately, but nested under a caller's outer transaction (e.g. the
+     * subscriptions:prepare-v2 upgrade bridge) it queues until that outer
+     * transaction commits, and is discarded entirely on rollback -- suppressing
+     * false "plan changed" audits for changes that never actually persisted.
+     *
+     * @param array<string,mixed> $payload
+     */
     private function emitAudit(array $payload): void
     {
-        $logger = $this->resolveLogger();
-        if ($logger !== null) {
-            $logger->info('subscriptions.plan_changed', $payload);
-            return;
-        }
+        db($this->context)->afterCommit(function () use ($payload): void {
+            $logger = $this->resolveLogger();
+            if ($logger !== null) {
+                $logger->info('subscriptions.plan_changed', $payload);
+                return;
+            }
 
-        error_log('[Subscriptions] subscriptions.plan_changed ' . json_encode($payload, JSON_THROW_ON_ERROR));
+            error_log('[Subscriptions] subscriptions.plan_changed ' . json_encode($payload, JSON_THROW_ON_ERROR));
+        });
     }
 
     private function resolveLogger(): ?LoggerInterface
