@@ -7,7 +7,13 @@ namespace Glueful\Extensions\Subscriptions\Repositories;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Subject;
 
-final class SubscriptionRepository
+/**
+ * Intentionally NON-final: the receipts-first projector's test suite subclasses
+ * updateBySubject() to simulate a transient (non-unique-violation) database
+ * failure, proving the whole projection transaction -- including the just-claimed
+ * pending receipt -- rolls back on a genuine error rather than swallowing it.
+ */
+class SubscriptionRepository
 {
     /**
      * 1.x facade: the workspace's OWN subscription, i.e. the tenant self-subject

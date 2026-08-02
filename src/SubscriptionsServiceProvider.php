@@ -22,6 +22,7 @@ use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
 use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
+use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
@@ -149,10 +150,13 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'shared' => true,
                 'autowire' => true,
             ],
+            // Explicit factory (Task 10): ProviderEventReceiptRepository has no
+            // constructor dependencies but is NOT (yet) registered as a standalone
+            // service -- that's Task 14's job. Constructing it directly here keeps
+            // the projector's own definition self-contained until then.
             SubscriptionEventProjectorInterface::class => [
-                'class' => SubscriptionEventProjector::class,
+                'factory' => [self::class, 'makeSubscriptionEventProjector'],
                 'shared' => true,
-                'autowire' => true,
             ],
             // Registered as a service so the '@serviceId' lazy listener resolves.
             PayviaSubscriptionEventBridge::class => [
@@ -203,6 +207,18 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             $c->has(CacheStore::class) ? $c->get(CacheStore::class) : null,
             (bool) ($cacheConfig['enabled'] ?? true),
             (int) ($cacheConfig['ttl'] ?? 300),
+        );
+    }
+
+    public static function makeSubscriptionEventProjector(ContainerInterface $c): SubscriptionEventProjector
+    {
+        return new SubscriptionEventProjector(
+            $c->get(SubscriptionRepository::class),
+            $c->get(SubscriptionEventRepository::class),
+            new ProviderEventReceiptRepository(),
+            $c->get(PlanCatalog::class),
+            $c->get(ApplicationContext::class),
+            $c->get(SubjectResolverInterface::class),
         );
     }
 

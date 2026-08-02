@@ -96,7 +96,9 @@ The projector handles exactly these `type` strings (from
 Any **other** `type` that still maps to an existing subscription is **recorded
 (idempotency claim) with no projection** — it becomes a first-class deduped log
 entry instead of being silently dropped. An event that does **not** map to any
-subscription is a graceful no-op (there is nothing to record it against).
+subscription still claims its receipt, which is settled `rejected` with an
+allowlisted code (see [§ metadata and subject validation](#metadata-and-subject-validation))
+instead of touching subscription state.
 
 ### `normalized` keys
 
@@ -105,40 +107,70 @@ All keys are optional except where noted (read by `mapToSubscription()`,
 
 | Key | Required? | Notes |
 |---|---|---|
-| `gateway_subscription_id` | **Required to map** | Combined with `gateway` to find the subscription via `findByProviderSubscription`. Without it (and without a `metadata.tenant_uuid` recovery on a `subscription.created`), the event cannot be attached and the projector no-ops. |
+| `gateway_subscription_id` | **Required to map** | Combined with `gateway` to find the subscription via `findByProviderSubscription`. Without it (and without a validated `metadata` recovery on a `subscription.created`), the event cannot be attached and its receipt is rejected `unmapped_subscription`. |
 | `status` | optional | Must be one of `active`, `trialing`, `past_due`, `canceled`, `incomplete`, `paused` (case-insensitive). Any other value is ignored. |
 | `current_period_end` | optional | Any string `\DateTimeImmutable` can parse (datetime/timestamp). Unparseable values are ignored. |
-| `metadata` | optional | An object/array. Only `metadata['tenant_uuid']` is read, and only as a **recovery hint** (see below). |
+| `metadata` | optional | An object/array. `tenant_uuid`/`subject_type`/`subject_uuid` are read for subject validation and cross-checks (see below); everything else is ignored. |
 
-### `logicalEventKey` idempotency
+### `logicalEventKey` idempotency (receipts-first)
 
 `logicalEventKey` (paired with `gateway`) is the dedupe key. The projector:
 
-1. Does a cheap read-side early-out via `existsByLogicalKey` when both `gateway`
-   and `logicalEventKey` are non-empty.
-2. Claims the event inside the projection transaction by inserting a
-   `subscription_events` row that is **unique on `(provider_gateway, provider_logical_event_key)`**.
-   If a concurrent delivery already claimed it, the unique violation is swallowed
-   (debug-logged) and the projection rolls back.
+1. Does a cheap read-side early-out via `existsByLogicalKey` (checked against the
+   provider-event **receipts** table) when both `gateway` and `logicalEventKey`
+   are non-empty.
+2. Opens ONE transaction and claims the event by inserting a `pending` row into
+   `subscription_provider_event_receipts`, which is **unique on
+   `(provider_gateway, provider_logical_event_key)`**. That claim — not the
+   `subscription_events` insert — is the real idempotency gate. If a concurrent
+   delivery already claimed it, the unique violation is swallowed (debug-logged)
+   and the whole transaction rolls back.
+3. Once claimed, the receipt is always settled before the transaction ends:
+   `rejected` (with an allowlisted code — see below) if subject/plan validation
+   fails, or `accepted` alongside the `subscription_events` append and the
+   state-machine write. Rejection **commits** — it's a diagnosable outcome, not
+   an error. Only a genuine transient failure (anything that isn't a unique
+   violation) rolls the whole transaction back, pending receipt included, so the
+   provider's retry of the same logical event can succeed later.
 
 So the same logical event delivered twice (or concurrently) projects exactly
 once. Give each distinct logical event a distinct key, and give retries of the
 same event the same key.
 
-### `metadata.tenant_uuid` is a recovery hint only
+### `metadata` and subject validation
 
-`metadata.tenant_uuid` flows verbatim from the provider's webhook payload, so it
-is **not a trust anchor**. The projector uses it in exactly one narrow case: on a
-`subscription.created` whose `(gateway, gateway_subscription_id)` is not yet
-linked to any row, it may attach an **unlinked** subscription (identified by that
-tenant UUID) to the provider — writing both `provider_gateway` and
-`provider_subscription_id`.
+`metadata` fields flow verbatim from the provider's webhook payload, so they are
+**not a trust anchor** by themselves — the projector validates before trusting.
 
-It will **never move an existing link**: if the target row is already linked to a
-*different* provider subscription, the projector logs a relink-conflict anomaly
-and no-ops. It does not relink based on provider-echoed metadata. (A server-issued
-correlation token is the proper long-term mechanism, but that is an app-side
-concern, out of scope here.)
+**On a `subscription.created` whose `(gateway, gateway_subscription_id)` is not
+yet linked to any row**, `metadata` is the ONLY way to establish a new link:
+
+- `metadata['tenant_uuid']` is required. `metadata['subject_type']` /
+  `metadata['subject_uuid']` may be omitted (defaults to the tenant self-subject,
+  the 1.x shape) but if `subject_type` is given, `subject_uuid` must be too.
+  Missing/incomplete → rejected `missing_subject`.
+- The resulting subject must pass `SubjectResolverInterface::validate()` (the
+  shipped `DefaultSubjectResolver` rejects every **user** subject). Failing →
+  rejected `invalid_subject`.
+- The relink recovery below runs **only** for a validated **tenant** subject; a
+  validated user subject has no recovery path here → rejected
+  `unmapped_subscription`.
+- The target row's plan must actually be assignable to the resolved subject's
+  scope (a tenant subject needs a platform plan). Mismatch → rejected
+  `plan_scope_mismatch`.
+- No existing row for that tenant at all → rejected `unmapped_subscription`.
+
+The relink itself will **never move an existing link**: if the target row is
+already linked to a *different* provider subscription, the projector logs a
+relink-conflict anomaly and rejects (`unmapped_subscription`). It does not relink
+based on provider-echoed metadata alone. (A server-issued correlation token is
+the proper long-term mechanism, but that is an app-side concern, out of scope
+here.)
+
+**On any event that already maps to a linked row** (found via
+`gateway`/`gateway_subscription_id`), any subject fields present in `metadata`
+are cross-checked against that row's stored subject triple — a mismatch rejects
+(`subject_mismatch`) rather than being silently ignored.
 
 ---
 
@@ -291,19 +323,27 @@ use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
 use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
 use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
+use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 
 // A subscription already linked to the acme provider, currently past_due.
 // (provider_gateway = 'acme', provider_subscription_id = 'acme_1')
 
 // --- Event projection: a successful payment settles past_due -> active ---
+// Every inbound event is claimed as a `pending` provider-event receipt before
+// projection runs (the receipts table's (gateway, logical_key) unique is the
+// real idempotency gate), then settled to accepted or rejected -- see
+// "Receipts and subject validation" below.
 $projector = new SubscriptionEventProjector(
     new SubscriptionRepository(),
     new SubscriptionEventRepository(),
+    new ProviderEventReceiptRepository(),
     PlanCatalog::fromContext($context),
     $context,
+    new DefaultSubjectResolver(),
 );
 
 $projector->project(new ProviderSubscriptionEvent(

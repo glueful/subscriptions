@@ -8,8 +8,10 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
 use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
+use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Tests\Support\CapturingLogger;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
@@ -17,16 +19,23 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
  * Claim-first projection of provider events (S6/S7), driven directly through the
  * generic ProviderSubscriptionEvent DTO (no payvia wrapper). Ports every case from
  * the former PaymentProviderEventListenerTest plus the unknown-type-claims case.
+ *
+ * Since Task 10 the claim/idempotency gate lives on the provider-event RECEIPT
+ * (see ReceiptProjectionTest for the receipts-first behavior itself); this suite
+ * keeps its focus on the state-machine mapping (computeChanges()) and the
+ * subscription-row side effects, which are unchanged.
  */
 final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
 {
-    private function projector(?SubscriptionEventRepository $events = null): SubscriptionEventProjector
+    private function projector(?ProviderEventReceiptRepository $receipts = null): SubscriptionEventProjector
     {
         return new SubscriptionEventProjector(
             new SubscriptionRepository(),
-            $events ?? new SubscriptionEventRepository(),
+            new SubscriptionEventRepository(),
+            $receipts ?? new ProviderEventReceiptRepository(),
             PlanCatalog::fromContext($this->appContext()),
             $this->appContext(),
+            new DefaultSubjectResolver(),
         );
     }
 
@@ -125,16 +134,17 @@ final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
         // The dedupe test above short-circuits at the read-side early-out. Here
         // existsByLogicalKey() always lies (false) -- simulating the race window
         // where two deliveries both pass the read check -- so BOTH dispatches
-        // reach the transactional claim and the DB unique index is the ONLY gate:
-        // claim-failure -> rollback -> no re-projection, and no exception escapes.
-        $blindEvents = new class extends SubscriptionEventRepository {
+        // reach the transactional claim and the receipts table's unique index is
+        // the ONLY gate: claim-failure -> rollback -> no re-projection, and no
+        // exception escapes.
+        $blindReceipts = new class extends ProviderEventReceiptRepository {
             public function existsByLogicalKey(ApplicationContext $context, string $gateway, string $key): bool
             {
                 return false; // the read side never sees the claim
             }
         };
 
-        $projector = $this->projector($blindEvents);
+        $projector = $this->projector($blindReceipts);
 
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',

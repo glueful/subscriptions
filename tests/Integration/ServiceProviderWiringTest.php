@@ -15,7 +15,6 @@ use Glueful\Extensions\Subscriptions\Http\PlanController;
 use Glueful\Extensions\Subscriptions\Http\RequireEntitlement;
 use Glueful\Extensions\Subscriptions\Http\RequirePlanManagementPermission;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
-use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
 use Glueful\Extensions\Subscriptions\RateLimiting\EntitlementTierResolver;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
@@ -75,13 +74,17 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
             self::assertTrue($services[$id]['shared']);
         }
 
-        // The projector is bound behind its interface (shared, autowired).
-        $projector = $services[SubscriptionEventProjectorInterface::class] ?? null;
-        self::assertIsArray($projector);
-        self::assertSame(SubscriptionEventProjector::class, $projector['class']);
-        self::assertTrue($projector['shared']);
-
-        foreach ([PlanCatalog::class, EntitlementResolver::class, SubscriptionService::class] as $id) {
+        // The projector is bound behind its interface via an explicit factory
+        // (Task 10): it constructs ProviderEventReceiptRepository directly since
+        // that repository isn't registered as a standalone service yet (Task 14).
+        foreach (
+            [
+            PlanCatalog::class,
+            EntitlementResolver::class,
+            SubscriptionService::class,
+            SubscriptionEventProjectorInterface::class,
+            ] as $id
+        ) {
             self::assertIsArray($services[$id] ?? null, "Missing factory service definition: {$id}");
             self::assertArrayHasKey('factory', $services[$id]);
             self::assertTrue($services[$id]['shared']);
@@ -100,6 +103,10 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
 
         self::assertInstanceOf(FactoryDefinition::class, $definitions[PlanCatalog::class] ?? null);
         self::assertInstanceOf(FactoryDefinition::class, $definitions[EntitlementResolver::class] ?? null);
+        self::assertInstanceOf(
+            FactoryDefinition::class,
+            $definitions[SubscriptionEventProjectorInterface::class] ?? null
+        );
         self::assertInstanceOf(FactoryDefinition::class, $definitions[SubscriptionService::class] ?? null);
         self::assertArrayHasKey(\Glueful\Entitlements\Contracts\EntitlementCheckerInterface::class, $definitions);
         self::assertArrayHasKey('require_entitlement', $definitions);
@@ -182,6 +189,14 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         $service = $serviceDef->resolve($container);
         self::assertInstanceOf(SubscriptionService::class, $service);
         self::assertNull($service->current('no-such-tenant'));
+
+        /** @var FactoryDefinition $projectorDef */
+        $projectorDef = $services[SubscriptionEventProjectorInterface::class];
+        $projector = $projectorDef->resolve($container);
+        self::assertInstanceOf(
+            \Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector::class,
+            $projector
+        );
     }
 
     public function testBootWithPayviaAbsentRegistersNoListenerAndDoesNotThrow(): void

@@ -6,21 +6,36 @@ namespace Glueful\Extensions\Subscriptions\Projection;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
+use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Subject;
+use Glueful\Extensions\Subscriptions\SubjectType;
+use Glueful\Helpers\Utils;
 use Psr\Log\LoggerInterface;
 
 /**
- * Owns all provider-event projection rules: claim-first idempotency, tenant
- * relink (unlinked-only), the status state machine, period/grace handling.
- * Provider-agnostic -- consumes a ProviderSubscriptionEvent DTO.
+ * Owns all provider-event projection rules: receipts-first claim/idempotency,
+ * subject-triple validation on creation, subject cross-checks on later events,
+ * tenant relink (unlinked-only, tenant subjects only), the status state machine,
+ * period/grace handling. Provider-agnostic -- consumes a ProviderSubscriptionEvent DTO.
  *
- * Concurrency-safe idempotency is claim-first: the subscription_events insert
- * (unique on (provider_gateway, provider_logical_event_key)) and the projection run
- * in ONE transaction, so a duplicate/concurrent delivery that loses the claim
- * rolls back and never re-projects (e.g. grace is never extended twice).
+ * Receipts-first idempotency (Task 10, spec §2/§8): the FIRST thing project() does
+ * inside its one transaction is claim a `pending` row in
+ * `subscription_provider_event_receipts` on (provider_gateway,
+ * provider_logical_event_key) -- that unique index, not the subscription_events
+ * insert, is the real idempotency gate. A duplicate/concurrent delivery that loses
+ * the claim rolls the whole transaction back and never re-projects. Once claimed,
+ * the receipt is always settled before the transaction ends: `markRejected()` for
+ * an event that fails subject/plan validation (which COMMITS -- a rejection is a
+ * diagnosable outcome, not an error) or `markAccepted()` alongside the
+ * subscription_events append and the state-machine write (all atomic). Only a
+ * genuine transient failure (anything that is not a unique violation) propagates
+ * out of the transaction uncaught, rolling everything back -- including the
+ * pending receipt -- so the provider's retry of the same logical event can
+ * succeed later.
  */
 final class SubscriptionEventProjector implements SubscriptionEventProjectorInterface
 {
@@ -30,8 +45,10 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     public function __construct(
         private readonly SubscriptionRepository $subscriptions,
         private readonly SubscriptionEventRepository $events,
+        private readonly ProviderEventReceiptRepository $receipts,
         private readonly PlanCatalog $catalog,
         private readonly ApplicationContext $context,
+        private readonly SubjectResolverInterface $subjects,
     ) {
     }
 
@@ -46,33 +63,43 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
         if (
             $gateway !== ''
             && $logicalKey !== ''
-            && $this->events->existsByLogicalKey($this->context, $gateway, $logicalKey)
+            && $this->receipts->existsByLogicalKey($this->context, $gateway, $logicalKey)
         ) {
             return;
         }
 
-        $sub = $this->mapToSubscription($gateway, $type, $normalized);
-        if ($sub === null) {
-            return; // unmapped provider subscription -> graceful no-op
-        }
-
-        // Behavior change vs. the old listener: an unknown-but-MAPPED type is
-        // still claimed/recorded (empty change set) instead of returning early.
-        $changes = $this->computeChanges($type, $sub, $normalized) ?? [];
-
-        $from = isset($sub['status']) ? (string) $sub['status'] : null;
-        $to = isset($changes['status']) ? (string) $changes['status'] : $from;
+        $receiptUuid = Utils::generateNanoID(12);
+        $pendingRow = array_merge(
+            [
+                'uuid' => $receiptUuid,
+                'provider_gateway' => $gateway,
+                'provider_logical_event_key' => $logicalKey !== '' ? $logicalKey : null,
+                'event_type' => $type,
+                'data' => ProviderReceiptData::sanitize($normalized),
+            ],
+            $this->candidateIdentity($normalized)
+        );
 
         try {
             db($this->context)->transaction(
-                function () use ($sub, $changes, $gateway, $logicalKey, $from, $to, $type, $normalized): void {
-                    // The event and the projected write both belong to the SUBJECT that
-                    // owns the mapped row -- a workspace subscription and a user
-                    // membership can share a tenant_uuid, so neither may be addressed by
-                    // tenant alone.
-                    $subject = $this->subjectOf($sub);
-
+                function () use ($receiptUuid, $pendingRow, $gateway, $type, $logicalKey, $normalized): void {
                     // (1) CLAIM -- throws on (provider_gateway, provider_logical_event_key) duplicate.
+                    $this->receipts->insertPending($this->context, $pendingRow);
+
+                    // (2) RESOLVE -- only the claim winner reaches here.
+                    [$sub, $rejectionCode] = $this->resolveTarget($gateway, $type, $normalized);
+                    if ($sub === null) {
+                        /** @var string $rejectionCode */
+                        $this->receipts->markRejected($this->context, $receiptUuid, $rejectionCode);
+                        return; // rejected receipts COMMIT -- nothing else changes.
+                    }
+
+                    // (3) PROJECT + ACCEPT, atomically.
+                    $subject = $this->subjectOf($sub);
+                    $changes = $this->computeChanges($type, $sub, $normalized) ?? [];
+                    $from = isset($sub['status']) ? (string) $sub['status'] : null;
+                    $to = isset($changes['status']) ? (string) $changes['status'] : $from;
+
                     $this->events->insertOrThrow($this->context, [
                         'tenant_uuid' => $subject->tenantUuid,
                         'subject_type' => $subject->type,
@@ -86,14 +113,20 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                         'data' => $normalized,
                     ]);
 
-                    // (2) PROJECT -- only the claim winner reaches here.
                     if ($changes !== []) {
                         $this->subscriptions->updateBySubject($this->context, $subject, $changes);
                     }
+
+                    $this->receipts->markAccepted($this->context, $receiptUuid, [
+                        'tenant_uuid' => $subject->tenantUuid,
+                        'subject_type' => $subject->type,
+                        'subject_uuid' => $subject->uuid,
+                        'plan_uuid' => $this->scalarOrNull($sub['plan_uuid'] ?? null),
+                    ]);
                 }
             );
         } catch (\Throwable $e) {
-            if ($this->events->isUniqueViolation($e)) {
+            if ($this->receipts->isUniqueViolation($e)) {
                 // Observability on the swallow branch: a misclassified integrity
                 // error would otherwise vanish silently. Debug-level by design.
                 $this->resolveLogger()?->debug('Duplicate provider event claim skipped', [
@@ -106,8 +139,227 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
 
                 return; // a concurrent/duplicate delivery already owns this logical event
             }
-            throw $e;
+            throw $e; // transient failure -> whole transaction rolled back, propagate for retry
         }
+    }
+
+    /**
+     * The raw, UNRESOLVED subject/plan hint straight off the provider's metadata --
+     * stored on the receipt purely for diagnosis. Never trusted; resolveTarget()
+     * is what actually establishes/validates identity.
+     *
+     * @param array<string,mixed> $normalized
+     * @return array<string,mixed>
+     */
+    private function candidateIdentity(array $normalized): array
+    {
+        $metadata = is_array($normalized['metadata'] ?? null) ? $normalized['metadata'] : [];
+
+        return [
+            'candidate_tenant_uuid' => $this->scalarOrNull($metadata['tenant_uuid'] ?? null),
+            'candidate_subject_type' => $this->scalarOrNull($metadata['subject_type'] ?? null),
+            'candidate_subject_uuid' => $this->scalarOrNull($metadata['subject_uuid'] ?? null),
+            'candidate_plan_uuid' => $this->scalarOrNull($metadata['plan_uuid'] ?? null),
+        ];
+    }
+
+    /**
+     * Locates the target subscription row and validates it's safe to project onto.
+     *
+     * - Already linked (found by provider_gateway/provider_subscription_id): any
+     *   subject metadata present on the event is cross-checked against the row's
+     *   stored triple; a mismatch rejects (`subject_mismatch`).
+     * - Not linked, non-created type: nothing to recover -> `unmapped_subscription`.
+     * - Not linked, `subscription.created`: attempted recovery via metadata,
+     *   see recoverCreatedSubscription().
+     *
+     * @param array<string,mixed> $normalized
+     * @return array{0: array<string,mixed>|null, 1: string|null} the resolved row,
+     *         or null plus an allowlisted rejection code.
+     */
+    private function resolveTarget(string $gateway, string $type, array $normalized): array
+    {
+        $gwSubId = $this->scalarOrNull($normalized['gateway_subscription_id'] ?? null);
+
+        $sub = ($gateway !== '' && $gwSubId !== null)
+            ? $this->subscriptions->findByProviderSubscription($this->context, $gateway, $gwSubId)
+            : null;
+
+        if ($sub !== null) {
+            $mismatch = $this->crossCheckMetadataSubject($sub, $normalized);
+
+            return $mismatch !== null ? [null, $mismatch] : [$sub, null];
+        }
+
+        if ($type !== 'subscription.created' || $gateway === '' || $gwSubId === null) {
+            return [null, 'unmapped_subscription'];
+        }
+
+        return $this->recoverCreatedSubscription($gateway, $gwSubId, $normalized);
+    }
+
+    /**
+     * Any subject field present in the event's metadata must agree with the
+     * ALREADY-STORED triple on the row it maps to -- the row's own identity is
+     * the trust anchor once linked, so metadata is only ever a corroborating
+     * cross-check here, never a new source of trust (that's created-event
+     * recovery's job, see recoverCreatedSubscription()).
+     *
+     * @param array<string,mixed> $sub
+     * @param array<string,mixed> $normalized
+     */
+    private function crossCheckMetadataSubject(array $sub, array $normalized): ?string
+    {
+        $metadata = is_array($normalized['metadata'] ?? null) ? $normalized['metadata'] : [];
+
+        $columns = ['tenant_uuid' => 'tenant_uuid', 'subject_type' => 'subject_type', 'subject_uuid' => 'subject_uuid'];
+        foreach ($columns as $metaKey => $column) {
+            if (!array_key_exists($metaKey, $metadata)) {
+                continue;
+            }
+
+            $given = (string) $this->scalarOrNull($metadata[$metaKey]);
+            $stored = isset($sub[$column]) ? (string) $sub[$column] : '';
+            if ($given !== $stored) {
+                return 'subject_mismatch';
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The ONLY place a subscription.created event may establish trust in a subject
+     * it hasn't already been linked to. Requires a complete triple (spec §2/§8):
+     * tenant_uuid is mandatory; subject_type/subject_uuid may be omitted for 1.x
+     * back-compat (defaults to the tenant self-subject) but if subject_type IS
+     * given, subject_uuid must be too. The resolved subject must then pass
+     * SubjectResolverInterface::validate() -- the shipped DefaultSubjectResolver
+     * rejects every user subject, so this recovery path is effectively tenant-only
+     * out of the box, matching the 1.x relink recovery it supersedes.
+     *
+     * @param array<string,mixed> $normalized
+     * @return array{0: array<string,mixed>|null, 1: string|null}
+     */
+    private function recoverCreatedSubscription(string $gateway, string $gwSubId, array $normalized): array
+    {
+        $metadata = is_array($normalized['metadata'] ?? null) ? $normalized['metadata'] : [];
+
+        $tenantUuid = $this->scalarOrNull($metadata['tenant_uuid'] ?? null) ?? '';
+        if ($tenantUuid === '') {
+            return [null, 'missing_subject'];
+        }
+
+        $subjectType = $this->scalarOrNull($metadata['subject_type'] ?? null);
+        if ($subjectType === null) {
+            // 1.x shape: no subject fields at all -> a tenant self-subject.
+            $subjectType = SubjectType::TENANT;
+            $subjectUuid = $tenantUuid;
+        } else {
+            $subjectUuid = $this->scalarOrNull($metadata['subject_uuid'] ?? null);
+            if ($subjectUuid === null) {
+                return [null, 'missing_subject'];
+            }
+        }
+
+        $subject = new Subject($tenantUuid, $subjectType, $subjectUuid);
+        if (!$this->subjects->validate($this->context, $subject)) {
+            return [null, 'invalid_subject'];
+        }
+
+        // 1.x relink recovery survives ONLY for validated tenant subjects (spec's
+        // scope for Task 10) -- a validated user subject has no recovery mechanism
+        // here and is treated the same as any other unmapped subscription.
+        if ($subject->type !== SubjectType::TENANT) {
+            return [null, 'unmapped_subscription'];
+        }
+
+        return $this->relinkTenantSubscription($gateway, $gwSubId, $subject);
+    }
+
+    /**
+     * The 1.x tenant-metadata relink recovery (unchanged rules, now gated on a
+     * validated subject above): an UNLINKED row named by metadata's tenant_uuid may
+     * be attached to this provider subscription. A row already linked to a
+     * DIFFERENT provider subscription is NEVER moved -- refused and logged as an
+     * anomaly, exactly as before.
+     *
+     * @return array{0: array<string,mixed>|null, 1: string|null}
+     */
+    private function relinkTenantSubscription(string $gateway, string $gwSubId, Subject $subject): array
+    {
+        $tenantUuid = $subject->tenantUuid;
+        $existing = $this->subscriptions->findByTenant($this->context, $tenantUuid);
+        if ($existing === null) {
+            return [null, 'unmapped_subscription'];
+        }
+
+        $existingSubId = $this->scalarOrNull($existing['provider_subscription_id'] ?? null) ?? '';
+
+        if ($existingSubId !== '') {
+            $existingGateway = $this->scalarOrNull($existing['provider_gateway'] ?? null) ?? '';
+
+            // Already linked to THIS exact (gateway, sub id): a no-op relink --
+            // still gate it on plan-audience coherence before accepting.
+            if ($existingGateway === $gateway && $existingSubId === $gwSubId) {
+                return $this->requireCoherentPlan($existing, $subject);
+            }
+
+            // Already linked to a DIFFERENT provider subscription: refuse to move
+            // the link. Log the anomaly (no payload) and reject gracefully.
+            $this->resolveLogger()?->warning('Provider relink conflict skipped', [
+                'event' => 'subscriptions.relink_conflict_skipped',
+                'tenant_uuid' => $tenantUuid,
+                'existing_gateway' => $existingGateway,
+                'existing_subscription_id' => $existingSubId,
+                'incoming_gateway' => $gateway,
+                'incoming_subscription_id' => $gwSubId,
+            ]);
+
+            return [null, 'unmapped_subscription'];
+        }
+
+        [, $rejectionCode] = $this->requireCoherentPlan($existing, $subject);
+        if ($rejectionCode !== null) {
+            return [null, $rejectionCode];
+        }
+
+        $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
+            'provider_gateway' => $gateway,
+            'provider_subscription_id' => $gwSubId,
+        ]);
+
+        return [$this->subscriptions->findByTenant($this->context, $tenantUuid), null];
+    }
+
+    /**
+     * Plan-audience coherence (spec §4, mirroring SubscriptionService::requireAssignablePlan()):
+     * the row's plan must actually be assignable to the resolved subject's scope --
+     * a tenant subject requires a platform ('tenant', '') plan. Guards against
+     * relinking into a row whose plan is unresolvable or scoped to a different
+     * audience/owner entirely.
+     *
+     * @param array<string,mixed> $sub
+     * @return array{0: array<string,mixed>|null, 1: string|null}
+     */
+    private function requireCoherentPlan(array $sub, Subject $subject): array
+    {
+        $planUuid = $this->scalarOrNull($sub['plan_uuid'] ?? null);
+        $plan = $planUuid !== null ? $this->catalog->planForUuid($planUuid) : null;
+
+        [$audience, $owner] = $subject->type === SubjectType::USER
+            ? [SubjectType::USER, $subject->tenantUuid]
+            : [SubjectType::TENANT, ''];
+
+        if (
+            $plan === null
+            || (string) ($plan['audience'] ?? '') !== $audience
+            || (string) ($plan['owner_tenant_uuid'] ?? '') !== $owner
+        ) {
+            return [null, 'plan_scope_mismatch'];
+        }
+
+        return [$sub, null];
     }
 
     /**
@@ -127,6 +379,11 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             (string) ($sub['subject_type'] ?? ''),
             (string) ($sub['subject_uuid'] ?? ''),
         );
+    }
+
+    private function scalarOrNull(mixed $value): ?string
+    {
+        return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
     }
 
     /**
@@ -150,88 +407,6 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
         }
 
         return null;
-    }
-
-    /**
-     * Map provider (gateway, gateway_subscription_id) -> tenant subscription row.
-     * On subscription.created an UNLINKED row can be recovered via the provider
-     * metadata's tenant_uuid -- writing BOTH provider_gateway and provider_subscription_id.
-     *
-     * SECURITY: `metadata.tenant_uuid` flows verbatim from the provider webhook
-     * payload (the provider passes metadata through unmodified), so it is NOT a
-     * trust anchor. It is used here only as a RECOVERY HINT to attach an
-     * as-yet-unlinked subscription to its tenant -- never to MOVE an existing link
-     * from one provider subscription to another. A row that is already linked is
-     * left untouched (a mismatch is logged as an anomaly and no-ops). The real
-     * trust anchor would be a server-issued correlation token round-tripped through
-     * the provider, which is an app-side concern and out of scope here.
-     *
-     * @param array<string,mixed> $normalized
-     * @return array<string,mixed>|null
-     */
-    private function mapToSubscription(string $gateway, string $type, array $normalized): ?array
-    {
-        $gwSubId = $normalized['gateway_subscription_id'] ?? null;
-        $gwSubId = is_scalar($gwSubId) && (string) $gwSubId !== '' ? (string) $gwSubId : null;
-
-        $sub = ($gateway !== '' && $gwSubId !== null)
-            ? $this->subscriptions->findByProviderSubscription($this->context, $gateway, $gwSubId)
-            : null;
-
-        if ($sub !== null || $type !== 'subscription.created' || $gateway === '' || $gwSubId === null) {
-            return $sub;
-        }
-
-        $metadata = $normalized['metadata'] ?? null;
-        $tenantUuid = is_array($metadata) && isset($metadata['tenant_uuid']) && is_scalar($metadata['tenant_uuid'])
-            ? (string) $metadata['tenant_uuid']
-            : '';
-        if ($tenantUuid === '') {
-            return null;
-        }
-
-        $existing = $this->subscriptions->findByTenant($this->context, $tenantUuid);
-        if ($existing === null) {
-            return null;
-        }
-
-        // Only attach when the target row is NOT already linked. We must never
-        // overwrite an existing provider link based on provider-echoed metadata.
-        $existingSubId = $existing['provider_subscription_id'] ?? null;
-        $existingSubId = is_scalar($existingSubId) ? (string) $existingSubId : '';
-
-        if ($existingSubId !== '') {
-            $existingGateway = is_scalar($existing['provider_gateway'] ?? null)
-                ? (string) $existing['provider_gateway']
-                : '';
-
-            // Already linked to THIS exact (gateway, sub id): a no-op relink --
-            // return the row so projection proceeds normally. (Defensive: the
-            // findByProviderSubscription lookup above would already have matched it.)
-            if ($existingGateway === $gateway && $existingSubId === $gwSubId) {
-                return $existing;
-            }
-
-            // Already linked to a DIFFERENT provider subscription: refuse to move
-            // the link. Log the anomaly (no payload) and no-op gracefully.
-            $this->resolveLogger()?->warning('Provider relink conflict skipped', [
-                'event' => 'subscriptions.relink_conflict_skipped',
-                'tenant_uuid' => $tenantUuid,
-                'existing_gateway' => $existingGateway,
-                'existing_subscription_id' => $existingSubId,
-                'incoming_gateway' => $gateway,
-                'incoming_subscription_id' => $gwSubId,
-            ]);
-
-            return null;
-        }
-
-        $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
-            'provider_gateway' => $gateway,
-            'provider_subscription_id' => $gwSubId,
-        ]);
-
-        return $this->subscriptions->findByTenant($this->context, $tenantUuid);
     }
 
     /**

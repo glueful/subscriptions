@@ -14,8 +14,12 @@ use Glueful\Helpers\Utils;
  * DB-enforced (provider_gateway, provider_logical_event_key) unique index is the
  * idempotency gate, mirroring SubscriptionEventRepository's claim pattern), then
  * settled to accepted or rejected once the subject/plan identity is resolved.
+ *
+ * Intentionally NON-final: the projector's test suite subclasses
+ * existsByLogicalKey() to simulate the read-side race window and prove the
+ * DB-enforced claim gate, mirroring SubscriptionEventRepository's own pattern.
  */
-final class ProviderEventReceiptRepository
+class ProviderEventReceiptRepository
 {
     /**
      * Claims the (provider_gateway, provider_logical_event_key) slot for this webhook
