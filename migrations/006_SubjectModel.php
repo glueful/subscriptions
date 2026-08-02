@@ -120,25 +120,58 @@ final class SubjectModel implements MigrationInterface
         }
     }
 
+    /**
+     * Guards every column add with hasColumn() (mirroring createReceiptsTable()'s
+     * analogous hasTable() guard) so up() is idempotent/re-runnable: DDL auto-commits
+     * (MigrationManager runs up() with no transaction), so a mid-flight abort --
+     * abortIfPlanUuidUnresolved(), or an unrelated failure during constrain -- must not
+     * leave a re-run dying on "duplicate column" for columns a prior attempt already added.
+     */
     private function addSubjectColumns(SchemaBuilderInterface $schema): void
     {
-        $schema->alterTable('subscriptions', function ($table): void {
+        $this->ensureColumn($schema, 'subscriptions', 'subject_type', function ($table): void {
             $table->string('subject_type', 10)->notNull()->default('tenant');
+        });
+        $this->ensureColumn($schema, 'subscriptions', 'subject_uuid', function ($table): void {
             $table->string('subject_uuid', 64)->notNull()->default('');
+        });
+        $this->ensureColumn($schema, 'subscriptions', 'plan_uuid', function ($table): void {
             $table->string('plan_uuid', 12)->nullable();
         });
-        $schema->alterTable('subscription_overrides', function ($table): void {
+
+        $this->ensureColumn($schema, 'subscription_overrides', 'subject_type', function ($table): void {
             $table->string('subject_type', 10)->notNull()->default('tenant');
+        });
+        $this->ensureColumn($schema, 'subscription_overrides', 'subject_uuid', function ($table): void {
             $table->string('subject_uuid', 64)->notNull()->default('');
         });
-        $schema->alterTable('subscription_events', function ($table): void {
+
+        $this->ensureColumn($schema, 'subscription_events', 'subject_type', function ($table): void {
             $table->string('subject_type', 10)->notNull()->default('tenant');
+        });
+        $this->ensureColumn($schema, 'subscription_events', 'subject_uuid', function ($table): void {
             $table->string('subject_uuid', 64)->notNull()->default('');
         });
-        $schema->alterTable('subscription_plans', function ($table): void {
+
+        $this->ensureColumn($schema, 'subscription_plans', 'audience', function ($table): void {
             $table->string('audience', 10)->notNull()->default('tenant');
+        });
+        $this->ensureColumn($schema, 'subscription_plans', 'owner_tenant_uuid', function ($table): void {
             $table->string('owner_tenant_uuid', 64)->notNull()->default('');
         });
+    }
+
+    private function ensureColumn(
+        SchemaBuilderInterface $schema,
+        string $table,
+        string $column,
+        callable $define
+    ): void {
+        if ($schema->hasColumn($table, $column)) {
+            return;
+        }
+
+        $schema->alterTable($table, $define);
     }
 
     private function backfillSubjectUuids(SchemaBuilderInterface $schema): void
@@ -190,8 +223,8 @@ final class SubjectModel implements MigrationInterface
         }
 
         $this->alterColumnNotNull($schema, 'subscriptions', 'plan_uuid', $this->varchar(12));
+        $this->dropLegacyUniqueConstraint($schema, 'subscriptions', 'subscriptions_tenant_uuid_unique');
         $schema->alterTable('subscriptions', function ($table): void {
-            $table->dropIndex('subscriptions_tenant_uuid_unique');
             $table->unique(['tenant_uuid', 'subject_type', 'subject_uuid'], 'uniq_subscriptions_subject');
         });
     }
@@ -203,8 +236,8 @@ final class SubjectModel implements MigrationInterface
             return;
         }
 
+        $this->dropLegacyUniqueConstraint($schema, 'subscription_overrides', 'uniq_override_tenant_entitlement');
         $schema->alterTable('subscription_overrides', function ($table): void {
-            $table->dropIndex('uniq_override_tenant_entitlement');
             $table->unique(
                 ['tenant_uuid', 'subject_type', 'subject_uuid', 'entitlement'],
                 'uniq_override_subject_entitlement'
@@ -219,8 +252,8 @@ final class SubjectModel implements MigrationInterface
             return;
         }
 
+        $this->dropLegacyUniqueConstraint($schema, 'subscription_plans', 'subscription_plans_plan_key_unique');
         $schema->alterTable('subscription_plans', function ($table): void {
-            $table->dropIndex('subscription_plans_plan_key_unique');
             $table->unique(['audience', 'owner_tenant_uuid', 'plan_key'], 'uniq_plans_scope_key');
         });
     }
@@ -290,25 +323,32 @@ final class SubjectModel implements MigrationInterface
     {
         $pdo = $schema->getConnection()->getPDO();
 
+        // A subject_type='tenant' row whose subject_uuid diverges from tenant_uuid is
+        // ALSO not representable by 1.x (spec §1: subject_type=tenant => subject_uuid ===
+        // tenant_uuid) even though it passes a subject_type-only check -- restoring
+        // UNIQUE(tenant_uuid) afterward would then fail deep inside DDL (or worse, silently
+        // admit incoherent 1.x data), after receipts/columns were already dropped. Caught
+        // here, before any DDL.
         $this->assertNoRows(
             $pdo,
             $schema,
             'subscriptions',
-            "SELECT COUNT(*) FROM subscriptions WHERE subject_type <> 'tenant'",
+            "SELECT COUNT(*) FROM subscriptions WHERE subject_type <> 'tenant' OR subject_uuid <> tenant_uuid",
             'subscriptions'
         );
         $this->assertNoRows(
             $pdo,
             $schema,
             'subscription_overrides',
-            "SELECT COUNT(*) FROM subscription_overrides WHERE subject_type <> 'tenant'",
+            "SELECT COUNT(*) FROM subscription_overrides "
+            . "WHERE subject_type <> 'tenant' OR subject_uuid <> tenant_uuid",
             'subscription_overrides'
         );
         $this->assertNoRows(
             $pdo,
             $schema,
             'subscription_events',
-            "SELECT COUNT(*) FROM subscription_events WHERE subject_type <> 'tenant'",
+            "SELECT COUNT(*) FROM subscription_events WHERE subject_type <> 'tenant' OR subject_uuid <> tenant_uuid",
             'subscription_events'
         );
         $this->assertNoRows(
@@ -438,6 +478,32 @@ final class SubjectModel implements MigrationInterface
         };
         $schema->addPendingOperation($sql);
         $schema->execute();
+    }
+
+    /**
+     * MySQL/PostgreSQL only. Drops one of the three 1.x create-time unique constraints
+     * (migrations 001/002/004). MySQL's inline `UNIQUE KEY` is a real index, droppable via
+     * the fluent `dropIndex()`/`DROP INDEX`. PostgreSQL is different:
+     * `PostgreSQLSqlGenerator::createTable()` emits inline uniques as a named TABLE
+     * CONSTRAINT (`CONSTRAINT "name" UNIQUE (...)`, not a standalone index), and Postgres
+     * refuses `DROP INDEX` against a constraint-backed index ("use ALTER TABLE ... DROP
+     * CONSTRAINT instead" -- a real, verified PG error, not a hypothetical). Issued as a
+     * documented dialect-specific pending operation for pgsql; MySQL keeps the fluent path.
+     */
+    private function dropLegacyUniqueConstraint(
+        SchemaBuilderInterface $schema,
+        string $table,
+        string $constraintName
+    ): void {
+        if ($this->driver($schema) === 'pgsql') {
+            $schema->addPendingOperation("ALTER TABLE \"{$table}\" DROP CONSTRAINT \"{$constraintName}\"");
+            $schema->execute();
+            return;
+        }
+
+        $schema->alterTable($table, function ($t) use ($constraintName): void {
+            $t->dropIndex($constraintName);
+        });
     }
 
     /**

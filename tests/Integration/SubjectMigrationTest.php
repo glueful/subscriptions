@@ -209,6 +209,124 @@ final class SubjectMigrationTest extends SubscriptionsTestCase
         (new SubjectModel())->down($schema);
     }
 
+    public function testDownRefusesWhenAReceiptIsNotDerivableFromALegacyEvent(): void
+    {
+        $schema = $this->connection->getSchemaBuilder();
+        (new SubjectModel())->up($schema);
+
+        // No subscription_events row matches this receipt's claim key at all.
+        db($this->context)->table('subscription_provider_event_receipts')->insert([
+            'uuid' => 'rcpt0000001', 'provider_gateway' => 'stripe',
+            'provider_logical_event_key' => 'subscription.created:sub_orphan:v1',
+            'event_type' => 'subscription.created', 'tenant_uuid' => 't-1',
+            'subject_type' => 'tenant', 'subject_uuid' => 't-1', 'outcome' => 'accepted',
+        ]);
+
+        try {
+            (new SubjectModel())->down($schema);
+            self::fail('Expected RuntimeException: receipt is not derivable from a legacy event');
+        } catch (\RuntimeException $e) {
+            // fail closed BEFORE any DDL: the receipts table and v2 columns still exist.
+            self::assertTrue($schema->hasTable('subscription_provider_event_receipts'));
+            self::assertTrue($schema->hasColumn('subscriptions', 'subject_type'));
+            self::assertTrue($schema->hasColumn('subscription_plans', 'audience'));
+        }
+    }
+
+    public function testDownRefusesWhenAReceiptIsNotAccepted(): void
+    {
+        $schema = $this->connection->getSchemaBuilder();
+        (new SubjectModel())->up($schema);
+
+        // A rejected (or otherwise non-accepted) receipt can never have been produced by
+        // 006's own backfill (which only ever writes outcome='accepted'), so it is v2-only
+        // audit data -- refuse before any DDL, even if it happens to name a real event.
+        db($this->context)->table('subscription_provider_event_receipts')->insert([
+            'uuid' => 'rcpt0000002', 'provider_gateway' => 'stripe',
+            'provider_logical_event_key' => 'webhook.rejected:sub_rej:v1',
+            'event_type' => 'subscription.created', 'tenant_uuid' => 't-1',
+            'subject_type' => 'tenant', 'subject_uuid' => 't-1', 'outcome' => 'rejected',
+            'rejection_code' => 'mismatched_subject',
+        ]);
+
+        try {
+            (new SubjectModel())->down($schema);
+            self::fail('Expected RuntimeException: receipt outcome is not accepted');
+        } catch (\RuntimeException $e) {
+            self::assertTrue($schema->hasTable('subscription_provider_event_receipts'));
+            self::assertTrue($schema->hasColumn('subscriptions', 'subject_type'));
+        }
+    }
+
+    public function testAbortIfPlanUuidUnresolvedNamesTheOffendingKeyAndLeavesPlanUuidNullable(): void
+    {
+        // subscriptions:prepare-v2 structurally cannot leave a dangling plan_key unresolved
+        // (it synthesizes an archived plan for every key it finds), so 006's OWN
+        // abort-if-unresolved backstop can only be exercised by simulating a corrupted/
+        // tampered marker state directly: the guard (exactly one preparation row) passes,
+        // but the catalog still doesn't resolve the referenced plan_key.
+        db($this->context)->table('subscriptions')->insert([
+            'uuid' => 's1', 'tenant_uuid' => 't-1', 'plan_key' => 'ghost-plan', 'status' => 'active',
+        ]);
+        db($this->context)->table('subscription_v2_preparation')->insert([
+            'marker_key' => 'subject-model-v2', 'catalog_signature' => 'test',
+        ]);
+
+        $schema = $this->connection->getSchemaBuilder();
+
+        try {
+            (new SubjectModel())->up($schema);
+            self::fail('Expected RuntimeException for unresolved plan_uuid');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('ghost-plan', $e->getMessage());
+        }
+
+        // No half-applied constraint: plan_uuid is still nullable -- the constrain step
+        // (which makes it NOT NULL) never ran, because the abort happens before it.
+        self::assertTrue($schema->hasColumn('subscriptions', 'plan_uuid'));
+        db($this->context)->table('subscriptions')->insert([
+            'uuid' => 's2', 'tenant_uuid' => 't-2', 'plan_key' => 'ghost-plan', 'status' => 'active',
+            'plan_uuid' => null,
+        ]);
+        $row = db($this->context)->table('subscriptions')->where('uuid', '=', 's2')->first();
+        self::assertNull($row['plan_uuid']);
+    }
+
+    public function testUpIsReRunnableAfterAnAbortedAttempt(): void
+    {
+        // Same tampered-marker setup as above: up() throws on unresolved plan_uuid AFTER
+        // addSubjectColumns() already ran (DDL auto-commits, no surrounding transaction).
+        db($this->context)->table('subscriptions')->insert([
+            'uuid' => 's1', 'tenant_uuid' => 't-1', 'plan_key' => 'ghost-plan', 'status' => 'active',
+        ]);
+        db($this->context)->table('subscription_v2_preparation')->insert([
+            'marker_key' => 'subject-model-v2', 'catalog_signature' => 'test',
+        ]);
+
+        $schema = $this->connection->getSchemaBuilder();
+        try {
+            (new SubjectModel())->up($schema);
+            self::fail('Expected the first attempt to abort on an unresolved plan_uuid');
+        } catch (\RuntimeException) {
+            // expected -- columns are now already added.
+        }
+
+        // Fix the catalog (what an operator would actually do) and re-run: must NOT die on
+        // "duplicate column" for subject_type/subject_uuid/plan_uuid/audience/owner_tenant_uuid,
+        // which a naive re-run would try to re-add.
+        db($this->context)->table('subscription_plans')->insert([
+            'uuid' => 'planghost001', 'plan_key' => 'ghost-plan', 'display_name' => 'Ghost',
+            'entitlements' => json_encode([], JSON_THROW_ON_ERROR), 'status' => 'archived', 'sort_order' => 0,
+        ]);
+
+        (new SubjectModel())->up($schema);
+
+        $sub = db($this->context)->table('subscriptions')->where('uuid', '=', 's1')->first();
+        self::assertSame('tenant', $sub['subject_type']);
+        self::assertSame('planghost001', $sub['plan_uuid']);
+        self::assertTrue($schema->hasTable('subscription_provider_event_receipts'));
+    }
+
     public function testDownReversesACompatibleTenantOnlyFixture(): void
     {
         $this->preparedFixture();
