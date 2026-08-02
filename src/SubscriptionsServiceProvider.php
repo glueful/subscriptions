@@ -340,7 +340,7 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         // (rejected candidates may carry no valid tenant) are deliberately NEVER
         // registered.
         try {
-            if (interface_exists(TenantTableRegistry::class)) {
+            if (interface_exists(TenantTableRegistry::class) && $context->hasContainer()) {
                 $container = container($context);
                 if ($container->has(TenantTableRegistry::class)) {
                     $registry = $container->get(TenantTableRegistry::class);
