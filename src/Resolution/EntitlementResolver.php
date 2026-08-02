@@ -9,6 +9,7 @@ use Glueful\Cache\CacheStore;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Subject;
 
 final class EntitlementResolver
 {
@@ -73,14 +74,25 @@ final class EntitlementResolver
     }
 
     /**
+     * Embeds the full subject triple (tenant_uuid, subject_type, subject_uuid) via
+     * Subject::tenant(), not just the bare tenant uuid -- mirroring
+     * MemberEntitlementResolver's member-path key (Subject::user()) so the two
+     * paths structurally cannot collide, even under a coincidental
+     * tenantUuid/userUuid match, without either resolver needing to know about
+     * the other's cache entries.
+     *
      * @param array<string,mixed>|null $subscription
      * @param array<string,mixed> $overrides
      */
     private function cacheKey(string $tenantUuid, ?array $subscription, array $overrides): string
     {
+        $subject = Subject::tenant($tenantUuid);
+
         return implode(':', [
             'subscriptions.ent',
-            $tenantUuid,
+            $subject->tenantUuid,
+            $subject->type,
+            $subject->uuid,
             $this->catalog->version(),
             $this->subscriptionSignature($subscription),
             $this->overridesSignature($overrides),

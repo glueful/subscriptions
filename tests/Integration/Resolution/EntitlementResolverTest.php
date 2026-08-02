@@ -113,7 +113,13 @@ final class EntitlementResolverTest extends SubscriptionsTestCase
         $cache->expects(self::once())
             ->method('remember')
             ->with(
-                self::stringStartsWith('subscriptions.ent:tenantA:' . $this->catalog()->version() . ':'),
+                // Embeds the full subject triple (tenant_uuid, subject_type,
+                // subject_uuid) via Subject::tenant(), not just the bare tenant
+                // uuid -- so the key structurally cannot collide with a member
+                // subject's cache entry even under a coincidental uuid match.
+                self::stringStartsWith(
+                    'subscriptions.ent:tenantA:tenant:tenantA:' . $this->catalog()->version() . ':'
+                ),
                 self::isInstanceOf(\Closure::class),
                 300
             )
