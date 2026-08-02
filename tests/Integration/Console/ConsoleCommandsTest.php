@@ -279,6 +279,31 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         self::assertSame(Command::FAILURE, $exit);
     }
 
+    public function testShowRejectsMismatchedTenantSubjectUuid(): void
+    {
+        // --subject-type=tenant (explicit or defaulted) with a --subject-uuid
+        // that disagrees with --tenant must fail closed rather than silently
+        // querying a different (non-existent) subject and reporting a
+        // false-positive "no subscription" success.
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'pro', 'status' => 'active']);
+
+        $command = new ShowSubscriptionCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute([
+            '--tenant' => 'tenantA',
+            '--subject-type' => 'tenant',
+            '--subject-uuid' => 'tenantB',
+        ]);
+
+        self::assertSame(Command::FAILURE, $exit);
+        self::assertStringContainsString(
+            '--subject-uuid must equal --tenant when --subject-type=tenant.',
+            $tester->getDisplay()
+        );
+    }
+
     public function testSetPlanStartsUserSubjectWithinMemberCatalogScope(): void
     {
         $this->seedMemberPlan('member', 'tenantA');
@@ -330,6 +355,34 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         );
     }
 
+    public function testSetPlanRejectsMismatchedTenantSubjectUuidAndLeavesRowUnchanged(): void
+    {
+        // The real hazard: silently discarding a mismatched --subject-uuid and
+        // writing through the tenant facade anyway, while the operator believes
+        // the uuid disambiguated the target. Must fail closed before any write.
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'free', 'status' => 'active']);
+
+        $command = new SetPlanCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute([
+            '--tenant' => 'tenantA',
+            '--plan' => 'pro',
+            '--subject-type' => 'tenant',
+            '--subject-uuid' => 'tenantB',
+        ]);
+
+        self::assertSame(Command::FAILURE, $exit);
+        self::assertStringContainsString(
+            '--subject-uuid must equal --tenant when --subject-type=tenant.',
+            $tester->getDisplay()
+        );
+        $row = $this->connection()->table('subscriptions')->where('tenant_uuid', 'tenantA')->first();
+        self::assertIsArray($row);
+        self::assertSame('free', $row['plan_key']);
+    }
+
     public function testSetPlanRejectsUserSubjectWithoutExplicitSubjectUuid(): void
     {
         $command = new SetPlanCommand();
@@ -343,6 +396,33 @@ final class ConsoleCommandsTest extends SubscriptionsTestCase
         ]);
 
         self::assertSame(Command::FAILURE, $exit);
+    }
+
+    public function testReconcileRejectsMismatchedTenantSubjectUuid(): void
+    {
+        // Must fail closed with the brief's one-line, non-zero-exit error --
+        // not an uncaught InvalidArgumentException from an incoherent Subject
+        // reaching reconcileFor().
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'free', 'status' => 'active']);
+
+        $command = new ReconcileCommand();
+        $this->bindCommand($command);
+
+        $tester = new CommandTester($command);
+        $exit = $tester->execute([
+            '--tenant' => 'tenantA',
+            '--subject-type' => 'tenant',
+            '--subject-uuid' => 'tenantB',
+        ]);
+
+        self::assertSame(Command::FAILURE, $exit);
+        self::assertStringContainsString(
+            '--subject-uuid must equal --tenant when --subject-type=tenant.',
+            $tester->getDisplay()
+        );
+        $row = $this->connection()->table('subscriptions')->where('tenant_uuid', 'tenantA')->first();
+        self::assertIsArray($row);
+        self::assertSame('active', $row['status']);
     }
 
     public function testReconcileSingleUserSubjectNoOpReportsSuccess(): void

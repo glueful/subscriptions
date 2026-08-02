@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Console;
 
 use Glueful\Console\BaseCommand;
+use Glueful\Extensions\Subscriptions\Console\Support\ResolvesSubjectOption;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Subscriptions\SubjectType;
@@ -35,23 +36,12 @@ use Symfony\Component\Console\Output\OutputInterface;
 )]
 final class ReconcileCommand extends BaseCommand
 {
+    use ResolvesSubjectOption;
+
     protected function configure(): void
     {
         $this->addOption('tenant', null, InputOption::VALUE_REQUIRED, 'Reconcile a single tenant uuid');
-        $this->addOption(
-            'subject-type',
-            null,
-            InputOption::VALUE_REQUIRED,
-            'Subject type (tenant|user) for --tenant',
-            SubjectType::TENANT
-        );
-        $this->addOption(
-            'subject-uuid',
-            null,
-            InputOption::VALUE_REQUIRED,
-            'Subject uuid for --tenant; defaults to --tenant '
-            . '(required, non-empty, when --subject-type=user)'
-        );
+        $this->configureSubjectOptions();
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -92,34 +82,6 @@ final class ReconcileCommand extends BaseCommand
         return self::SUCCESS;
     }
 
-    /**
-     * Resolves the target subject from --subject-type/--subject-uuid.
-     * Tenant mode (default) defaults the subject uuid to --tenant; user mode
-     * requires an explicit, non-empty --subject-uuid. On any invalid
-     * combination this emits a one-line error and returns null.
-     */
-    private function resolveSubject(InputInterface $input, string $tenant): ?Subject
-    {
-        $type = $this->nullableStringOption($input, 'subject-type') ?? SubjectType::TENANT;
-        if ($type !== SubjectType::TENANT && $type !== SubjectType::USER) {
-            $this->error("--subject-type must be 'tenant' or 'user'.");
-            return null;
-        }
-
-        $uuid = $this->nullableStringOption($input, 'subject-uuid');
-
-        if ($type === SubjectType::USER) {
-            if ($uuid === null) {
-                $this->error('--subject-uuid is required when --subject-type=user.');
-                return null;
-            }
-
-            return Subject::user($tenant, $uuid);
-        }
-
-        return new Subject($tenant, SubjectType::TENANT, $uuid ?? $tenant);
-    }
-
     private function notFoundMessage(Subject $subject): string
     {
         if ($subject->type === SubjectType::TENANT && $subject->uuid === $subject->tenantUuid) {
@@ -149,12 +111,5 @@ final class ReconcileCommand extends BaseCommand
             (string) ($row['plan_key'] ?? ''),
             (string) ($row['status'] ?? '')
         );
-    }
-
-    private function nullableStringOption(InputInterface $input, string $name): ?string
-    {
-        $value = $input->getOption($name);
-
-        return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
     }
 }
