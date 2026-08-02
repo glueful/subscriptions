@@ -457,9 +457,12 @@ final class SubjectModel implements MigrationInterface
             $table->dropIndex('uniq_subscriptions_subject');
         });
         $this->dropColumns($schema, 'subscriptions', ['plan_uuid', 'subject_uuid', 'subject_type']);
-        $schema->alterTable('subscriptions', function ($table): void {
-            $table->unique('tenant_uuid', 'subscriptions_tenant_uuid_unique');
-        });
+        $this->restoreLegacyUniqueConstraint(
+            $schema,
+            'subscriptions',
+            'subscriptions_tenant_uuid_unique',
+            ['tenant_uuid']
+        );
     }
 
     private function reverseOverrides(SchemaBuilderInterface $schema): void
@@ -468,9 +471,12 @@ final class SubjectModel implements MigrationInterface
             $table->dropIndex('uniq_override_subject_entitlement');
         });
         $this->dropColumns($schema, 'subscription_overrides', ['subject_uuid', 'subject_type']);
-        $schema->alterTable('subscription_overrides', function ($table): void {
-            $table->unique(['tenant_uuid', 'entitlement'], 'uniq_override_tenant_entitlement');
-        });
+        $this->restoreLegacyUniqueConstraint(
+            $schema,
+            'subscription_overrides',
+            'uniq_override_tenant_entitlement',
+            ['tenant_uuid', 'entitlement']
+        );
     }
 
     private function reverseEvents(SchemaBuilderInterface $schema): void
@@ -484,9 +490,12 @@ final class SubjectModel implements MigrationInterface
             $table->dropIndex('uniq_plans_scope_key');
         });
         $this->dropColumns($schema, 'subscription_plans', ['owner_tenant_uuid', 'audience']);
-        $schema->alterTable('subscription_plans', function ($table): void {
-            $table->unique('plan_key', 'subscription_plans_plan_key_unique');
-        });
+        $this->restoreLegacyUniqueConstraint(
+            $schema,
+            'subscription_plans',
+            'subscription_plans_plan_key_unique',
+            ['plan_key']
+        );
     }
 
     // ===========================================
@@ -536,6 +545,17 @@ final class SubjectModel implements MigrationInterface
      * refuses `DROP INDEX` against a constraint-backed index ("use ALTER TABLE ... DROP
      * CONSTRAINT instead" -- a real, verified PG error, not a hypothetical). Issued as a
      * documented dialect-specific pending operation for pgsql; MySQL keeps the fluent path.
+     *
+     * The pgsql branch is deliberately TOLERANT of both shapes the named object can have,
+     * so up() works whichever way the 1.x unique got there:
+     * - a real table CONSTRAINT (the shape `createTable()` in migrations 001/002/004 emits) --
+     *   removed by `DROP CONSTRAINT IF EXISTS`, which drops its backing index with it;
+     * - a plain unique INDEX of the same name (the shape a down() from a subscriptions
+     *   release before this fix left behind, because the fluent `unique()` compiles to
+     *   `CREATE UNIQUE INDEX` on pgsql) -- removed by the `DROP INDEX IF EXISTS` that
+     *   follows, which no-ops when the constraint path already cleaned up.
+     * Without the second statement a down()->up() round trip on PostgreSQL died at
+     * `DROP CONSTRAINT` ("constraint does not exist") with the legacy unique still enforced.
      */
     private function dropLegacyUniqueConstraint(
         SchemaBuilderInterface $schema,
@@ -543,7 +563,9 @@ final class SubjectModel implements MigrationInterface
         string $constraintName
     ): void {
         if ($this->driver($schema) === 'pgsql') {
-            $schema->addPendingOperation("ALTER TABLE \"{$table}\" DROP CONSTRAINT \"{$constraintName}\"");
+            foreach (self::pgDropLegacyUniqueSql($table, $constraintName) as $sql) {
+                $schema->addPendingOperation($sql);
+            }
             $schema->execute();
             return;
         }
@@ -551,6 +573,61 @@ final class SubjectModel implements MigrationInterface
         $schema->alterTable($table, function ($t) use ($constraintName): void {
             $t->dropIndex($constraintName);
         });
+    }
+
+    /**
+     * down()'s mirror of dropLegacyUniqueConstraint(): puts one of the three 1.x
+     * create-time uniques back.
+     *
+     * On pgsql this MUST restore a table CONSTRAINT, not an index. The fluent
+     * `unique()` path compiles to `CREATE UNIQUE INDEX "name" ...` there, which
+     * satisfies down() but silently breaks the next up(): its
+     * `ALTER TABLE ... DROP CONSTRAINT "name"` finds no constraint of that name and
+     * aborts the migration (I1). Restoring the constraint keeps down()->up()
+     * genuinely round-trippable. MySQL and SQLite keep the fluent path -- on both,
+     * the name the migration gives is the name `dropIndex()`/the table rebuild
+     * later addresses.
+     *
+     * @param list<string> $columns
+     */
+    private function restoreLegacyUniqueConstraint(
+        SchemaBuilderInterface $schema,
+        string $table,
+        string $constraintName,
+        array $columns
+    ): void {
+        if ($this->driver($schema) === 'pgsql') {
+            $schema->addPendingOperation(self::pgAddUniqueConstraintSql($table, $constraintName, $columns));
+            $schema->execute();
+            return;
+        }
+
+        $schema->alterTable($table, function ($t) use ($constraintName, $columns): void {
+            $t->unique(count($columns) === 1 ? $columns[0] : $columns, $constraintName);
+        });
+    }
+
+    /**
+     * Pure SQL builders for the pgsql branches above, kept static and
+     * side-effect-free so the emitted statements are assertable without a live
+     * PostgreSQL connection (see tests/Unit/Migrations/SubjectModelPgsqlSqlTest.php).
+     *
+     * @param list<string> $columns
+     */
+    private static function pgAddUniqueConstraintSql(string $table, string $constraintName, array $columns): string
+    {
+        $quoted = implode(', ', array_map(static fn (string $c): string => "\"{$c}\"", $columns));
+
+        return "ALTER TABLE \"{$table}\" ADD CONSTRAINT \"{$constraintName}\" UNIQUE ({$quoted})";
+    }
+
+    /** @return list<string> */
+    private static function pgDropLegacyUniqueSql(string $table, string $constraintName): array
+    {
+        return [
+            "ALTER TABLE \"{$table}\" DROP CONSTRAINT IF EXISTS \"{$constraintName}\"",
+            "DROP INDEX IF EXISTS \"{$constraintName}\"",
+        ];
     }
 
     /**
