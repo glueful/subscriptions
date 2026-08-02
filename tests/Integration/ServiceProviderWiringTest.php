@@ -30,7 +30,8 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
-use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolver;
+use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolverFactory;
+use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\SubscriptionsServiceProvider;
 use Glueful\Extensions\Subscriptions\Tests\Support\PermissiveSubjectResolver;
@@ -84,8 +85,8 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         }
 
         // The projector is bound behind its interface via an explicit factory
-        // (Task 10): it constructs ProviderEventReceiptRepository directly since
-        // that repository isn't registered as a standalone service yet (Task 14).
+        // (Task 10); since Task 14 it resolves ProviderEventReceiptRepository
+        // from the container rather than constructing it directly.
         foreach (
             [
             PlanCatalog::class,
@@ -120,17 +121,24 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         self::assertArrayHasKey(\Glueful\Entitlements\Contracts\EntitlementCheckerInterface::class, $definitions);
         self::assertArrayHasKey('require_entitlement', $definitions);
 
-        // Task 14: MemberEntitlementResolver's ctor-injected catalog is pinned to
-        // ONE workspace (Task 11's assertCatalogScopeMatches guard) -- a shared
-        // singleton would freeze that scope to whichever tenant happened to be
-        // current the first time the container built it. It MUST load as a
-        // non-shared factory, and RequireMemberEntitlement (which injects it via
-        // its own constructor) must be non-shared for the same reason.
-        self::assertInstanceOf(FactoryDefinition::class, $definitions[MemberEntitlementResolver::class] ?? null);
-        self::assertFalse($definitions[MemberEntitlementResolver::class]->isShared());
+        // Task 14 (fixed post-review): MemberEntitlementResolverFactory is
+        // STATELESS -- it builds a workspace-scoped MemberEntitlementResolver
+        // on demand from a caller-supplied tenantUuid (never from
+        // SubjectResolverInterface::currentTenant() read at DI-resolution
+        // time, which -- because Router::executeWithMiddleware() resolves
+        // every middleware from the container in ONE pre-pass before any
+        // handle() runs -- could bake a stale/empty scope). Being stateless,
+        // it and RequireMemberEntitlement (which now only injects this
+        // factory, not a pre-scoped resolver) are both ordinary SHARED
+        // services, exactly like require_entitlement's wiring.
+        self::assertInstanceOf(
+            FactoryDefinition::class,
+            $definitions[MemberEntitlementResolverFactory::class] ?? null
+        );
+        self::assertTrue($definitions[MemberEntitlementResolverFactory::class]->isShared());
 
         self::assertInstanceOf(AutowireDefinition::class, $definitions[RequireMemberEntitlement::class] ?? null);
-        self::assertFalse($definitions[RequireMemberEntitlement::class]->isShared());
+        self::assertTrue($definitions[RequireMemberEntitlement::class]->isShared());
         self::assertArrayHasKey('require_member_entitlement', $definitions);
 
         self::assertInstanceOf(
@@ -176,47 +184,49 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
     }
 
     /**
-     * Task 14 / Task 11's contract: MemberEntitlementResolver's constructor is
-     * handed a PlanCatalog already scoped to ONE workspace
-     * (`forScope($context, 'user', $tenantUuid)`); assertCatalogScopeMatches()
-     * throws if a caller ever reuses an instance built for a different tenant. A
-     * naive shared singleton registration would silently violate that contract
-     * the moment two different workspaces' requests hit the same process, so
-     * this MUST be a non-shared factory that resolves the current tenant (via
-     * SubjectResolverInterface) fresh on every container resolution.
+     * Task 14 (fixed post-review, Critical): MemberEntitlementResolverFactory
+     * builds a workspace-scoped MemberEntitlementResolver ON DEMAND from a
+     * caller-supplied tenantUuid -- it holds no per-tenant state of its own
+     * (only constant-for-the-app-lifetime deps: repositories, the effective
+     * plan resolver, the optional cache), so it is safe to be an ordinary
+     * SHARED factory. The earlier design read
+     * SubjectResolverInterface::currentTenant() INSIDE the factory at
+     * container-resolution time, which Router::executeWithMiddleware()'s
+     * resolve-every-middleware-before-any-handle()-runs pre-pass could catch
+     * before an earlier route-level tenancy middleware had set the tenant --
+     * baking a stale/empty scope that then threw once handle() reran
+     * currentTenant() and called resolveMap(). See
+     * MemberEntitlementResolverFactory's own docblock.
      */
-    public function testMemberEntitlementResolverIsRegisteredAsANonSharedFactory(): void
+    public function testMemberEntitlementResolverFactoryIsRegisteredAsASharedFactory(): void
     {
         $services = SubscriptionsServiceProvider::services();
 
-        $def = $services[MemberEntitlementResolver::class] ?? null;
-        self::assertIsArray($def, 'Missing MemberEntitlementResolver service definition');
+        $def = $services[MemberEntitlementResolverFactory::class] ?? null;
+        self::assertIsArray($def, 'Missing MemberEntitlementResolverFactory service definition');
         self::assertArrayHasKey('factory', $def);
-        self::assertFalse(
-            $def['shared'] ?? true,
-            'MemberEntitlementResolver must NOT be a shared singleton -- see Task 11\'s '
-                . 'assertCatalogScopeMatches() guard.'
+        self::assertTrue(
+            $def['shared'] ?? false,
+            'MemberEntitlementResolverFactory is stateless and safe to share.'
         );
     }
 
     /**
-     * Task 14: RequireMemberEntitlement's own constructor injects a
-     * MemberEntitlementResolver, so it inherits the same non-shared requirement
-     * -- a cached RequireMemberEntitlement would freeze its resolver (and thus
-     * its workspace scope) to whichever tenant was current the first time the
-     * container built it.
+     * Task 14 (fixed post-review): RequireMemberEntitlement now injects the
+     * stateless MemberEntitlementResolverFactory (not a pre-scoped resolver),
+     * and only asks it to build a workspace-scoped resolver INSIDE handle(),
+     * after its own currentTenant() read -- so, exactly like
+     * RequireEntitlement, it holds no tenant-scoped state and is safe to
+     * share.
      */
-    public function testRequireMemberEntitlementIsRegisteredAsNonSharedWithItsMiddlewareAlias(): void
+    public function testRequireMemberEntitlementIsRegisteredAsSharedWithItsMiddlewareAlias(): void
     {
         $services = SubscriptionsServiceProvider::services();
 
         $def = $services[RequireMemberEntitlement::class] ?? null;
         self::assertIsArray($def, 'Missing RequireMemberEntitlement service definition');
         self::assertSame(RequireMemberEntitlement::class, $def['class']);
-        self::assertFalse(
-            $def['shared'] ?? true,
-            'RequireMemberEntitlement must not be shared, mirroring MemberEntitlementResolver.'
-        );
+        self::assertTrue($def['shared'] ?? false, 'RequireMemberEntitlement holds no tenant-scoped state.');
         self::assertContains('require_member_entitlement', $def['alias']);
 
         self::assertSame(
@@ -322,27 +332,22 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         $receiptsDef = $services[ProviderEventReceiptRepository::class];
         self::assertInstanceOf(ProviderEventReceiptRepository::class, $receiptsDef->resolve($container));
 
-        // MemberEntitlementResolver's factory resolves the CURRENT tenant via
-        // SubjectResolverInterface and scopes its catalog to it -- rebind the
-        // resolver to a fake that names a real workspace, and each resolution
-        // must produce a FRESH instance (never shared) that is safely usable for
-        // that exact tenant (Task 11's assertCatalogScopeMatches guard would
-        // throw otherwise).
+        // MemberEntitlementResolverFactory is stateless -- resolving it does NOT
+        // touch SubjectResolverInterface at all, so binding it once and reusing
+        // it for RequireMemberEntitlement is exactly the intended shape.
         $this->bind(SubjectResolverInterface::class, new PermissiveSubjectResolver('tenantA', 'userA'));
 
-        /** @var FactoryDefinition $memberResolverDef */
-        $memberResolverDef = $services[MemberEntitlementResolver::class];
-        $memberResolverA = $memberResolverDef->resolve($container);
-        $memberResolverB = $memberResolverDef->resolve($container);
-        self::assertInstanceOf(MemberEntitlementResolver::class, $memberResolverA);
-        self::assertNotSame(
-            $memberResolverA,
-            $memberResolverB,
-            'MemberEntitlementResolver resolutions must never be reused across tenants'
-        );
-        self::assertSame([], $memberResolverA->resolveMap($this->appContext(), 'tenantA', 'userA'));
+        /** @var FactoryDefinition $memberResolverFactoryDef */
+        $memberResolverFactoryDef = $services[MemberEntitlementResolverFactory::class];
+        $memberResolverFactory = $memberResolverFactoryDef->resolve($container);
+        self::assertInstanceOf(MemberEntitlementResolverFactory::class, $memberResolverFactory);
 
-        $this->bind(MemberEntitlementResolver::class, $memberResolverA);
+        $this->bind(MemberEntitlementResolverFactory::class, $memberResolverFactory);
+
+        // forWorkspace() builds a fresh, correctly-scoped resolver per call --
+        // exercised directly here for the "no membership row" empty-map case.
+        $memberResolver = $memberResolverFactory->forWorkspace($this->appContext(), 'tenantA');
+        self::assertSame([], $memberResolver->resolveMap($this->appContext(), 'tenantA', 'userA'));
 
         /** @var AutowireDefinition $middlewareDef */
         $middlewareDef = $services[RequireMemberEntitlement::class];
@@ -355,6 +360,117 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
             'content.premium'
         );
         self::assertSame(\Glueful\Http\Response::HTTP_FORBIDDEN, $response->getStatusCode());
+    }
+
+    /**
+     * Coordinator-flagged Critical, reproduced and closed: simulates the exact
+     * pre-pass timing bug. Router::executeWithMiddleware() resolves EVERY
+     * middleware from the container in one pass BEFORE any handle() runs, so
+     * on a stack like ['tenant', 'require_member_entitlement:x'] the
+     * container builds require_member_entitlement's dependencies while
+     * SubjectResolverInterface::currentTenant() still reads null (the
+     * route-level tenancy middleware ordered earlier has not run its own
+     * handle() yet). Only AFTER that construction does the tenant context
+     * become available (the earlier middleware's handle() finally runs),
+     * before require_member_entitlement's OWN handle() executes.
+     *
+     * The old design baked SubjectResolverInterface::currentTenant() into the
+     * MemberEntitlementResolver factory itself, so this exact sequence baked
+     * a catalog scoped to `('user', '')`, and handle() calling resolveMap()
+     * against it -- with the NOW-correct non-empty tenantUuid -- tripped Task
+     * 11's assertCatalogScopeMatches() guard: an uncaught InvalidArgumentException
+     * (a 500), not the intended fail-closed 403 or a correct allow/deny.
+     *
+     * The fix (MemberEntitlementResolverFactory) never reads currentTenant()
+     * at construction time at all -- this test proves the fixed middleware
+     * resolves the CORRECT workspace scope regardless of when the tenant
+     * context becomes available relative to DI construction, and never
+     * throws.
+     */
+    public function testMiddlewareNeverBakesAStaleCatalogScopeWhenTenantContextArrivesAfterConstruction(): void
+    {
+        $this->connection()->table('subscription_plans')->insert([
+            'uuid' => 'planskewpro01',
+            'plan_key' => 'skew-pro',
+            'display_name' => 'Skew Pro',
+            'entitlements' => json_encode(['content.premium' => true], JSON_THROW_ON_ERROR),
+            'status' => 'active',
+            'sort_order' => 0,
+            'audience' => 'user',
+            'owner_tenant_uuid' => 'tenantSkew',
+        ]);
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantSkew',
+            'subject_type' => 'user',
+            'subject_uuid' => 'userSkew',
+            'plan_key' => 'skew-pro',
+            'status' => 'active',
+        ]);
+
+        // A mutable fake: currentTenant()/currentUser() can be changed AFTER
+        // the container has already resolved services against it, mirroring
+        // the pipeline's pre-pass-then-handle() timing.
+        $subjects = new class implements SubjectResolverInterface {
+            public ?string $tenant = null;
+            public ?string $user = null;
+
+            public function currentTenant(ApplicationContext $context): ?string
+            {
+                return $this->tenant;
+            }
+
+            public function currentUser(ApplicationContext $context): ?string
+            {
+                return $this->user;
+            }
+
+            public function validate(ApplicationContext $context, Subject $subject): bool
+            {
+                return true;
+            }
+        };
+
+        $this->bind(ApplicationContext::class, $this->appContext());
+        $this->bind(SubjectResolverInterface::class, $subjects);
+        $this->bind(SubscriptionRepository::class, new SubscriptionRepository());
+        $this->bind(OverrideRepository::class, new OverrideRepository());
+        $this->bind(EffectivePlanResolver::class, new EffectivePlanResolver());
+
+        $services = (new DefaultServicesLoader())->load(
+            SubscriptionsServiceProvider::services(),
+            SubscriptionsServiceProvider::class,
+            prod: true
+        );
+        $container = $this->appContext()->getContainer();
+
+        // Resolve (and thus construct) the factory AND the middleware while
+        // currentTenant() === null -- the pre-pass moment.
+        /** @var FactoryDefinition $factoryDef */
+        $factoryDef = $services[MemberEntitlementResolverFactory::class];
+        $resolverFactory = $factoryDef->resolve($container);
+        $this->bind(MemberEntitlementResolverFactory::class, $resolverFactory);
+
+        /** @var AutowireDefinition $middlewareDef */
+        $middlewareDef = $services[RequireMemberEntitlement::class];
+        $middleware = $middlewareDef->resolve($container);
+
+        // NOW the tenant/user context "arrives" -- simulating an earlier
+        // route-level tenancy middleware's handle() running before
+        // require_member_entitlement's.
+        $subjects->tenant = 'tenantSkew';
+        $subjects->user = 'userSkew';
+
+        $response = $middleware->handle(
+            Request::create('/content'),
+            fn (Request $request) => new \Glueful\Http\Response(['ok' => true]),
+            'content.premium'
+        );
+
+        self::assertSame(
+            200,
+            $response->getStatusCode(),
+            'must resolve the CORRECT workspace scope built inside handle(), never throw the scope guard'
+        );
     }
 
     public function testBootWithPayviaAbsentRegistersNoListenerAndDoesNotThrow(): void

@@ -4,12 +4,11 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Subscriptions\Tests\Integration\Http;
 
-use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Http\RequireMemberEntitlement;
 use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
-use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolver;
+use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolverFactory;
 use Glueful\Extensions\Subscriptions\Tests\Support\PermissiveSubjectResolver;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Http\Response;
@@ -44,10 +43,16 @@ final class RequireMemberEntitlementTest extends SubscriptionsTestCase
         ]);
     }
 
-    private function resolver(): MemberEntitlementResolver
+    /**
+     * Task 14 fix round: the middleware now takes a stateless
+     * MemberEntitlementResolverFactory and builds a workspace-scoped resolver
+     * itself, inside handle() -- so this factory is never pre-scoped to
+     * self::TENANT here; it derives its scope from whatever tenantUuid
+     * handle() actually resolves at call time.
+     */
+    private function resolverFactory(): MemberEntitlementResolverFactory
     {
-        return new MemberEntitlementResolver(
-            PlanCatalog::forScope($this->appContext(), 'user', self::TENANT),
+        return new MemberEntitlementResolverFactory(
             new SubscriptionRepository(),
             new OverrideRepository(),
             new EffectivePlanResolver(),
@@ -60,7 +65,7 @@ final class RequireMemberEntitlementTest extends SubscriptionsTestCase
     private function middleware(?string $tenantUuid, ?string $userUuid): RequireMemberEntitlement
     {
         return new RequireMemberEntitlement(
-            $this->resolver(),
+            $this->resolverFactory(),
             new PermissiveSubjectResolver($tenantUuid, $userUuid),
             $this->appContext()
         );

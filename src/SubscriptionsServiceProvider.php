@@ -32,8 +32,7 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
 use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
-use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolver;
-use Glueful\Extensions\Subscriptions\SubjectType;
+use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolverFactory;
 use Psr\Container\ContainerInterface;
 
 final class SubscriptionsServiceProvider extends ServiceProvider
@@ -151,12 +150,14 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'autowire' => true,
                 'alias' => ['subscriptions_plans_manage'],
             ],
-            // Task 14 -- spec §5/§11: the workspace-MEMBER middleware. Deliberately
-            // NOT shared: its own constructor injects MemberEntitlementResolver,
-            // so it inherits that service's per-tenant-scope restriction below.
+            // Task 14 -- spec §5/§11: the workspace-MEMBER middleware. Holds no
+            // tenant-scoped state itself -- it injects MemberEntitlementResolverFactory
+            // (below) and only asks it to build a workspace-scoped resolver INSIDE
+            // handle(), after its own currentTenant() read -- so, exactly like
+            // RequireEntitlement, an ordinary SHARED singleton is safe here.
             RequireMemberEntitlement::class => [
                 'class' => RequireMemberEntitlement::class,
-                'shared' => false,
+                'shared' => true,
                 'autowire' => true,
                 'alias' => ['require_member_entitlement'],
             ],
@@ -178,21 +179,20 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeSubscriptionEventProjector'],
                 'shared' => true,
             ],
-            // Task 14 -- spec §5/§11.6, Task 11's contract: this factory resolves
-            // the CURRENT workspace via SubjectResolverInterface and builds a
-            // PlanCatalog scoped to it (PlanCatalog::forScope($context, 'user',
-            // $tenantUuid)), because a workspace membership catalog is inherently
-            // tenant-specific (unlike the single global platform catalog). The
-            // resolver's own assertCatalogScopeMatches() guard throws if that
-            // scope is ever mismatched against the tenant resolveMap() is called
-            // with, so this MUST be a non-shared ('shared' => false) definition:
-            // a cached singleton would freeze the workspace scope to whichever
-            // tenant happened to be current the first time the container built
-            // it, then throw (or worse, silently leak entitlements -- see Task
-            // 11's fix round) for every OTHER workspace's request afterward.
-            MemberEntitlementResolver::class => [
-                'factory' => [self::class, 'makeMemberEntitlementResolver'],
-                'shared' => false,
+            // Task 14 (fixed post-review) -- spec §5/§11.6: a STATELESS factory
+            // (see its own docblock) that builds a workspace-scoped
+            // MemberEntitlementResolver ON DEMAND, from a caller-supplied
+            // tenantUuid, rather than baking any tenant into itself at DI time.
+            // Router::executeWithMiddleware() resolves every middleware from the
+            // container in one pre-pass BEFORE any handle() runs, so reading
+            // SubjectResolverInterface::currentTenant() at container-build time
+            // (the original design) can bake a stale/empty scope when a
+            // route-level tenancy middleware ordered earlier in the same stack
+            // has not yet run its own handle(). This factory itself has no
+            // per-tenant state, so it IS safe to share.
+            MemberEntitlementResolverFactory::class => [
+                'factory' => [self::class, 'makeMemberEntitlementResolverFactory'],
+                'shared' => true,
             ],
             // Task 14 -- spec §9: host-neutral subject/tenant data purge. No
             // per-request state (ApplicationContext is autowired per resolution
@@ -267,23 +267,18 @@ final class SubscriptionsServiceProvider extends ServiceProvider
     }
 
     /**
-     * Task 14 -- spec §5/§11.6: builds a MemberEntitlementResolver whose catalog
-     * is scoped to the CURRENT workspace, resolved fresh via
-     * SubjectResolverInterface on every call (this factory is registered
-     * non-shared -- see the docblock on its `services()` entry). A missing
-     * current tenant (no host tenancy binding, or an unauthenticated request)
-     * falls back to an empty owner scope; RequireMemberEntitlement's own
-     * currentTenant() check fails closed (403) before ever calling
-     * resolveMap() in that case, so the mismatched scope is never actually used.
+     * Task 14 (fixed post-review) -- spec §5/§11.6: builds the STATELESS
+     * {@see MemberEntitlementResolverFactory}. Deliberately does NOT read
+     * `SubjectResolverInterface::currentTenant()` here -- that read must
+     * happen inside `RequireMemberEntitlement::handle()`, not at DI
+     * resolution time (see the factory class's own docblock for why).
      */
-    public static function makeMemberEntitlementResolver(ContainerInterface $c): MemberEntitlementResolver
+    public static function makeMemberEntitlementResolverFactory(ContainerInterface $c): MemberEntitlementResolverFactory
     {
         $context = $c->get(ApplicationContext::class);
-        $tenantUuid = (string) ($c->get(SubjectResolverInterface::class)->currentTenant($context) ?? '');
         $cacheConfig = (array) config($context, 'subscriptions.cache', []);
 
-        return new MemberEntitlementResolver(
-            PlanCatalog::forScope($context, SubjectType::USER, $tenantUuid),
+        return new MemberEntitlementResolverFactory(
             $c->get(SubscriptionRepository::class),
             $c->get(OverrideRepository::class),
             $c->get(EffectivePlanResolver::class),
