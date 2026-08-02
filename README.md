@@ -445,6 +445,58 @@ at the cadence you want; the package does not self-schedule.
 "Works" for the checker always means: catalog + overrides + status gating; no
 payment object is ever consulted at check time.
 
+## Testing
+
+```bash
+composer test    # phpunit (Unit + Integration)
+composer analyze # phpstan
+composer phpcs   # PSR-12
+```
+
+The suite runs entirely against an in-memory SQLite database by default -- no
+external services required.
+
+### Testing against PostgreSQL
+
+`SubscriptionService::startFor()` isolates its insert in a nested transaction
+(a real `SAVEPOINT`) so a lost race on the subject-unique constraint rolls
+back only to that savepoint instead of poisoning the surrounding transaction
+(spec §8). SQLite tolerates an in-transaction error without aborting the
+session, so this failure mode can only be proven against a real PostgreSQL
+server. `tests/Integration/Concurrency/PostgresSavepointTest.php` covers it,
+gated behind three environment variables so it is a silent no-op (skipped)
+everywhere a PostgreSQL server isn't configured:
+
+| Variable                     | Example                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `SUBSCRIPTIONS_TEST_PG_DSN`  | `pgsql:host=127.0.0.1;port=5432;dbname=subscriptions_test` |
+| `SUBSCRIPTIONS_TEST_PG_USER` | `subscriptions_test`                                 |
+| `SUBSCRIPTIONS_TEST_PG_PASS` | `subscriptions_test` (an empty string is valid for trust-auth setups) |
+
+All three must be set (even if `_PASS` is empty) or the test skips itself via
+`markTestSkipped()`. When set, it opens a fresh `Connection` against that
+database, drops and re-creates the extension's tables, runs migrations
+001-006, then proves: a lost race on the SAME plan is idempotent, a lost race
+on a DIFFERENT plan raises `SubscriptionConflictException`, and -- the reason
+this suite exists -- a write issued in the outer transaction immediately
+after the savepoint-isolated violation still commits.
+
+Point it at any reachable PostgreSQL 13+ database, for example a local one:
+
+```bash
+createdb subscriptions_test
+psql -c "CREATE ROLE subscriptions_test LOGIN PASSWORD 'subscriptions_test'"
+psql -c "GRANT ALL ON DATABASE subscriptions_test TO subscriptions_test"
+
+SUBSCRIPTIONS_TEST_PG_DSN="pgsql:host=127.0.0.1;port=5432;dbname=subscriptions_test" \
+SUBSCRIPTIONS_TEST_PG_USER="subscriptions_test" \
+SUBSCRIPTIONS_TEST_PG_PASS="subscriptions_test" \
+vendor/bin/phpunit --filter PostgresSavepoint
+```
+
+CI runs this against a PostgreSQL 16 service container on every build -- see
+`.github/workflows/ci.yml`.
+
 ## Upgrading to 2.0
 
 Release 1.4.0 is the upgrade bridge from 1.x to the 2.0 subject model. Subscriptions
