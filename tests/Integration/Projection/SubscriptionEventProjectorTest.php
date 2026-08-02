@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
 use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
+use Glueful\Extensions\Subscriptions\Projection\UnmappedProviderSubscriptionException;
 use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
@@ -203,8 +204,11 @@ final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
         self::assertSame('k2', $events[0]['provider_logical_event_key']);
     }
 
-    public function testUnmappedGatewaySubscriptionIdNoOps(): void
+    public function testUnmappedGatewaySubscriptionIdThrowsRetryableAndNoOps(): void
     {
+        // "Unmapped" is a retryable rollback (fix round 2), not a silent no-op --
+        // see ReceiptProjectionTest for the receipt-claim rollback itself. Here we
+        // only need the state-machine side: no state change either way.
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
             'status' => 'active',
@@ -212,13 +216,18 @@ final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
             'provider_subscription_id' => 'sub_X',
         ]);
 
-        $this->project('subscription.past_due', 'k9', ['gateway_subscription_id' => 'sub_GHOST']);
+        try {
+            $this->project('subscription.past_due', 'k9', ['gateway_subscription_id' => 'sub_GHOST']);
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable
+        }
 
         self::assertSame('active', $this->row()['status']);
         self::assertSame(0, $this->eventCount());
     }
 
-    public function testGatewayScopedMapping(): void
+    public function testGatewayScopedMappingThrowsRetryable(): void
     {
         // Same provider-sub id on a DIFFERENT gateway must not match (per-gateway map).
         $this->seedSubscription([
@@ -228,7 +237,17 @@ final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
             'provider_subscription_id' => 'sub_X',
         ]);
 
-        $this->project('subscription.past_due', 'k1', ['gateway_subscription_id' => 'sub_X'], gateway: 'paystack');
+        try {
+            $this->project(
+                'subscription.past_due',
+                'k1',
+                ['gateway_subscription_id' => 'sub_X'],
+                gateway: 'paystack'
+            );
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable
+        }
 
         self::assertSame('active', $this->row()['status']);
         self::assertSame(0, $this->eventCount());
@@ -272,11 +291,16 @@ final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
         $logger = new CapturingLogger();
         $this->bind('logger', $logger);
 
-        $this->project('subscription.created', 'k1', [
-            'gateway_subscription_id' => 'sub_ATTACKER',
-            'status' => 'active',
-            'metadata' => ['tenant_uuid' => 'tenantA'],
-        ]);
+        try {
+            $this->project('subscription.created', 'k1', [
+                'gateway_subscription_id' => 'sub_ATTACKER',
+                'status' => 'active',
+                'metadata' => ['tenant_uuid' => 'tenantA'],
+            ]);
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable (fix round 2), but the link is still never moved.
+        }
 
         $row = $this->row();
         // Link is UNCHANGED -- the original provider subscription id survives.
@@ -319,20 +343,27 @@ final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
         self::assertSame(0, $this->eventCount());
     }
 
-    public function testSubscriptionCreatedForUnknownTenantNoOps(): void
+    public function testSubscriptionCreatedForUnknownTenantThrowsRetryable(): void
     {
-        // metadata names a tenant that has no subscription row -> no-op.
+        // metadata names a tenant that has no subscription row -> retryable
+        // (fix round 2), not a silent no-op: the tenant might simply not exist
+        // YET, so a redelivery later (once it does) must be able to succeed.
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
             'plan_key' => 'pro',
             'status' => 'incomplete',
         ]);
 
-        $this->project('subscription.created', 'k1', [
-            'gateway_subscription_id' => 'sub_NEW',
-            'status' => 'active',
-            'metadata' => ['tenant_uuid' => 'ghostTenant'],
-        ]);
+        try {
+            $this->project('subscription.created', 'k1', [
+                'gateway_subscription_id' => 'sub_NEW',
+                'status' => 'active',
+                'metadata' => ['tenant_uuid' => 'ghostTenant'],
+            ]);
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable
+        }
 
         self::assertSame('incomplete', $this->row('tenantA')['status']);
         self::assertSame(0, $this->eventCount());

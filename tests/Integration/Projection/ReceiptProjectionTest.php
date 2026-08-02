@@ -9,6 +9,7 @@ use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
 use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
+use Glueful\Extensions\Subscriptions\Projection\UnmappedProviderSubscriptionException;
 use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
@@ -19,11 +20,16 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
 /**
  * Task 10: the receipts-first provider projector. Every inbound provider event is
- * claimed as a `pending` receipt BEFORE resolution/projection, then settled to
- * accepted (atomically, with the state-machine write) or rejected (which COMMITS
- * -- rejection is not an error, it's a diagnosable outcome) inside the same
- * transaction. Only a genuine transient failure rolls the whole transaction back,
- * pending receipt included, so the provider's retry can succeed.
+ * claimed as a `pending` receipt BEFORE resolution/projection, then settled
+ * ATOMICALLY, split by determinism (fix round 2):
+ * - Deterministic rejections (missing_subject, invalid_subject,
+ *   plan_scope_mismatch, subject_mismatch) settle the receipt `rejected` and
+ *   COMMIT -- a rejection is a diagnosable outcome, not an error.
+ * - "Unmapped" is retryable, not deterministic: it throws
+ *   {@see UnmappedProviderSubscriptionException} and rolls the WHOLE
+ *   transaction back, pending receipt claim included.
+ * - Any other genuine transient failure also rolls the whole transaction back,
+ *   pending receipt included, so the provider's retry can succeed.
  */
 final class ReceiptProjectionTest extends SubscriptionsTestCase
 {
@@ -76,6 +82,15 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
     private function eventCount(): int
     {
         return count($this->connection()->table('subscription_events')->get());
+    }
+
+    /** @return array<string,mixed>|null */
+    private function eventRowFor(string $gateway, string $key): ?array
+    {
+        return $this->connection()->table('subscription_events')
+            ->where('provider_gateway', '=', $gateway)
+            ->where('provider_logical_event_key', '=', $key)
+            ->first();
     }
 
     /** @return array<string,mixed> */
@@ -137,6 +152,52 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertIsArray($receipt);
         $data = json_decode((string) $receipt['data'], true);
         self::assertSame(['gateway_subscription_id' => 'sub_X'], $data);
+    }
+
+    /**
+     * RULING B: ProviderEventData::sanitize() is shared by BOTH writers -- the
+     * receipt's `data` AND the accepted subscription_events row's `data` must
+     * end up with the IDENTICAL safe projection of the same hostile payload;
+     * neither ever stores the raw fields.
+     */
+    public function testAcceptedEventDataIsSanitizedIdenticallyOnBothReceiptAndEvent(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'trialing',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $this->project('subscription.past_due', 'k1', [
+            'gateway_subscription_id' => 'sub_X',
+            'status' => 'active',
+            'customer_email' => 'attacker@example.com',
+            'card' => ['token' => 'tok_secret'],
+            'metadata' => [
+                'tenant_uuid' => 'tenantA',
+                'billing_email' => 'someone@example.com',
+                'api_key' => 'sk_live_hostile',
+            ],
+        ]);
+
+        $receipt = $this->receiptFor('paystack', 'k1');
+        self::assertIsArray($receipt);
+        self::assertSame('accepted', $receipt['outcome']);
+        $receiptData = json_decode((string) $receipt['data'], true);
+
+        $event = $this->eventRowFor('paystack', 'k1');
+        self::assertIsArray($event);
+        $eventData = json_decode((string) $event['data'], true);
+
+        // Same safe projection on both sides -- and neither leaks the hostile fields.
+        self::assertSame($receiptData, $eventData);
+        self::assertArrayNotHasKey('customer_email', $eventData);
+        self::assertArrayNotHasKey('card', $eventData);
+        self::assertArrayNotHasKey('billing_email', $eventData['metadata'] ?? []);
+        self::assertArrayNotHasKey('api_key', $eventData['metadata'] ?? []);
+        self::assertSame('tenantA', $eventData['metadata']['tenant_uuid'] ?? null);
     }
 
     public function testDuplicateLogicalKeyLosesTheReceiptsClaimAndNeverReprojects(): void
@@ -300,10 +361,14 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertSame(0, $this->eventCount());
     }
 
-    public function testUnmappedSubscriptionRejectsAValidatedNonTenantSubjectInsteadOfRelinking(): void
+    public function testUnmappedSubscriptionThrowsRetryableForAValidatedNonTenantSubjectInsteadOfRelinking(): void
     {
         // The 1.x tenant-metadata relink recovery survives ONLY for validated
-        // TENANT subjects -- a validated USER subject must NOT trigger it.
+        // TENANT subjects -- a validated USER subject must NOT trigger it, and
+        // (fix round 2) "unmapped" is now a RETRYABLE rollback, not a committed
+        // rejection: the deterministic codes (missing/invalid_subject,
+        // plan_scope_mismatch, subject_mismatch) stay committed, but "unmapped"
+        // alone rolls back the pending receipt claim too.
         $projector = $this->projector(subjects: new PermissiveSubjectResolver());
 
         $this->seedSubscription([
@@ -312,21 +377,24 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
             'status' => 'incomplete',
         ]);
 
-        $this->project('subscription.created', 'k1', [
-            'gateway_subscription_id' => 'sub_NEW',
-            'status' => 'active',
-            'metadata' => ['tenant_uuid' => 'tenantA', 'subject_type' => 'user', 'subject_uuid' => 'user_1'],
-        ], projector: $projector);
+        try {
+            $this->project('subscription.created', 'k1', [
+                'gateway_subscription_id' => 'sub_NEW',
+                'status' => 'active',
+                'metadata' => ['tenant_uuid' => 'tenantA', 'subject_type' => 'user', 'subject_uuid' => 'user_1'],
+            ], projector: $projector);
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable
+        }
 
-        $receipt = $this->receiptFor('paystack', 'k1');
-        self::assertIsArray($receipt);
-        self::assertSame('rejected', $receipt['outcome']);
-        self::assertSame('unmapped_subscription', $receipt['rejection_code']);
+        self::assertNull($this->receiptFor('paystack', 'k1'));
+        self::assertSame(0, $this->receiptCount());
         self::assertSame(0, $this->eventCount());
         self::assertSame('incomplete', $this->row()['status']);
     }
 
-    public function testUnmappedSubscriptionRejectsWhenTheNamedTenantHasNoSubscriptionRow(): void
+    public function testUnmappedSubscriptionThrowsRetryableWhenTheNamedTenantHasNoSubscriptionRow(): void
     {
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
@@ -334,17 +402,79 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
             'status' => 'incomplete',
         ]);
 
-        $this->project('subscription.created', 'k1', [
-            'gateway_subscription_id' => 'sub_NEW',
-            'status' => 'active',
-            'metadata' => ['tenant_uuid' => 'ghostTenant'],
+        try {
+            $this->project('subscription.created', 'k1', [
+                'gateway_subscription_id' => 'sub_NEW',
+                'status' => 'active',
+                'metadata' => ['tenant_uuid' => 'ghostTenant'],
+            ]);
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable
+        }
+
+        self::assertNull($this->receiptFor('paystack', 'k1'));
+        self::assertSame(0, $this->receiptCount());
+        self::assertSame(0, $this->eventCount());
+    }
+
+    /**
+     * RULING A's required test: a first delivery that cannot map to anything
+     * throws the typed retryable exception, rolling back the claim entirely (no
+     * receipt row, no event, no state change) -- then, once the local
+     * subscription is created, redelivering the EXACT SAME logical key succeeds
+     * (the claim was never spent by the first, failed attempt).
+     */
+    public function testUnmappedSubscriptionCanBeRetriedOnceTheLocalSubscriptionExists(): void
+    {
+        $projector = $this->projector();
+
+        try {
+            $this->project(
+                'subscription.past_due',
+                'k1',
+                ['gateway_subscription_id' => 'sub_X'],
+                projector: $projector
+            );
+            self::fail('Expected UnmappedProviderSubscriptionException on the first delivery.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable
+        }
+
+        // Nothing durable was left behind by the failed first attempt.
+        self::assertNull($this->receiptFor('paystack', 'k1'));
+        self::assertSame(0, $this->receiptCount());
+        self::assertSame(0, $this->eventCount());
+        self::assertNull(
+            $this->connection()->table('subscriptions')->where('tenant_uuid', '=', 'tenantA')->first()
+        );
+
+        // The local subscription now comes into existence (e.g. via checkout).
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'trialing',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
         ]);
+
+        // The provider redelivers the SAME logical event key -- it succeeds now.
+        $this->project(
+            'subscription.past_due',
+            'k1',
+            ['gateway_subscription_id' => 'sub_X'],
+            projector: $projector
+        );
 
         $receipt = $this->receiptFor('paystack', 'k1');
         self::assertIsArray($receipt);
-        self::assertSame('rejected', $receipt['outcome']);
-        self::assertSame('unmapped_subscription', $receipt['rejection_code']);
-        self::assertSame(0, $this->eventCount());
+        self::assertSame('accepted', $receipt['outcome']);
+        self::assertSame(1, $this->receiptCount());
+        self::assertSame(1, $this->eventCount());
+
+        $row = $this->row();
+        self::assertSame('past_due', $row['status']);
+        self::assertNotEmpty($row['grace_ends_at']);
     }
 
     public function testPlanScopeMismatchRejectsWhenTheTargetRowsPlanDoesNotResolve(): void
@@ -435,7 +565,7 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertSame(1, $this->eventCount());
     }
 
-    public function testRelinkConflictStillRefusesToMoveAnExistingLinkAndRejectsTheReceipt(): void
+    public function testRelinkConflictStillRefusesToMoveAnExistingLinkAndThrowsRetryable(): void
     {
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
@@ -445,16 +575,19 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
             'provider_subscription_id' => 'sub_EXISTING',
         ]);
 
-        $this->project('subscription.created', 'k1', [
-            'gateway_subscription_id' => 'sub_ATTACKER',
-            'status' => 'active',
-            'metadata' => ['tenant_uuid' => 'tenantA'],
-        ]);
+        try {
+            $this->project('subscription.created', 'k1', [
+                'gateway_subscription_id' => 'sub_ATTACKER',
+                'status' => 'active',
+                'metadata' => ['tenant_uuid' => 'tenantA'],
+            ]);
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable, but the link is still never moved (below).
+        }
 
-        $receipt = $this->receiptFor('paystack', 'k1');
-        self::assertIsArray($receipt);
-        self::assertSame('rejected', $receipt['outcome']);
-        self::assertSame('unmapped_subscription', $receipt['rejection_code']);
+        self::assertNull($this->receiptFor('paystack', 'k1'));
+        self::assertSame(0, $this->receiptCount());
 
         $row = $this->row();
         self::assertSame('sub_EXISTING', $row['provider_subscription_id']);
@@ -580,7 +713,7 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertSame(0, $this->eventCount());
     }
 
-    public function testUnmappedGatewaySubscriptionIdRejectsWithoutTouchingState(): void
+    public function testUnmappedGatewaySubscriptionIdThrowsRetryableWithoutTouchingState(): void
     {
         $this->seedSubscription([
             'tenant_uuid' => 'tenantA',
@@ -589,12 +722,15 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
             'provider_subscription_id' => 'sub_X',
         ]);
 
-        $this->project('subscription.past_due', 'k9', ['gateway_subscription_id' => 'sub_GHOST']);
+        try {
+            $this->project('subscription.past_due', 'k9', ['gateway_subscription_id' => 'sub_GHOST']);
+            self::fail('Expected UnmappedProviderSubscriptionException.');
+        } catch (UnmappedProviderSubscriptionException) {
+            // expected -- retryable
+        }
 
-        $receipt = $this->receiptFor('paystack', 'k9');
-        self::assertIsArray($receipt);
-        self::assertSame('rejected', $receipt['outcome']);
-        self::assertSame('unmapped_subscription', $receipt['rejection_code']);
+        self::assertNull($this->receiptFor('paystack', 'k9'));
+        self::assertSame(0, $this->receiptCount());
         self::assertSame('active', $this->row()['status']);
         self::assertSame(0, $this->eventCount());
     }

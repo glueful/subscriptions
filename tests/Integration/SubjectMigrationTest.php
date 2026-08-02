@@ -8,6 +8,7 @@ use Glueful\Extensions\Subscriptions\Console\PrepareV2Command;
 use Glueful\Extensions\Subscriptions\Database\Migrations\SubjectModel;
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
+use Glueful\Extensions\Subscriptions\Projection\ProviderEventData;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Tests\Support\LegacySchemaTestCase;
 use Symfony\Component\Console\Command\Command;
@@ -107,6 +108,64 @@ final class SubjectMigrationTest extends LegacySchemaTestCase
         self::assertSame('t-1', $receipts[0]['tenant_uuid']);
         self::assertSame('tenant', $receipts[0]['subject_type']);
         self::assertSame('t-1', $receipts[0]['subject_uuid']);
+    }
+
+    /**
+     * RULING B (Task 10 fix round 2): historical provider-sourced events may carry
+     * a raw payload (customer PII, or worse -- a credential the provider echoed
+     * back) in `data`, written before ProviderEventData::sanitize() existed. 006
+     * must sanitize it in place so the upgrade itself doesn't leave that exposure
+     * sitting in the database.
+     */
+    public function testHistoricalProviderEventDataIsSanitizedInPlaceDuringMigration(): void
+    {
+        $hostile = [
+            'gateway_subscription_id' => 'sub_1',
+            'status' => 'active',
+            'customer_email' => 'attacker@example.com',
+            'metadata' => [
+                'tenant_uuid' => 't-1',
+                'billing_address' => '123 Secret St',
+                'api_key' => 'sk_live_hostile',
+            ],
+            'card' => ['token' => 'tok_secret'],
+        ];
+
+        db($this->context)->table('subscription_events')->insert([
+            'uuid' => 'evt00000003', 'tenant_uuid' => 't-1', 'type' => 'subscription.created',
+            'source' => 'provider_event', 'provider_gateway' => 'stripe',
+            'provider_logical_event_key' => 'subscription.created:sub_1:v2',
+            'data' => json_encode($hostile, JSON_THROW_ON_ERROR),
+        ]);
+
+        // A manual event's data is app-generated, never a raw provider payload --
+        // it must survive completely untouched (it wouldn't sanitize losslessly:
+        // 'reason' below isn't on ProviderEventData's allowlist at all).
+        db($this->context)->table('subscription_events')->insert([
+            'uuid' => 'evt00000004', 'tenant_uuid' => 't-1', 'type' => 'manual',
+            'source' => 'manual', 'provider_gateway' => null, 'provider_logical_event_key' => null,
+            'data' => json_encode(['reason' => 'support override'], JSON_THROW_ON_ERROR),
+        ]);
+
+        (new SubjectModel())->up($this->connection->getSchemaBuilder());
+
+        $sanitizedRow = db($this->context)->table('subscription_events')
+            ->where('uuid', '=', 'evt00000003')->first();
+        $decoded = json_decode((string) $sanitizedRow['data'], true);
+
+        self::assertSame(ProviderEventData::sanitize($hostile), $decoded);
+        self::assertArrayNotHasKey('customer_email', $decoded);
+        self::assertArrayNotHasKey('card', $decoded);
+        self::assertArrayNotHasKey('billing_address', $decoded['metadata'] ?? []);
+        self::assertArrayNotHasKey('api_key', $decoded['metadata'] ?? []);
+        self::assertSame('t-1', $decoded['metadata']['tenant_uuid'] ?? null);
+
+        $manualRow = db($this->context)->table('subscription_events')
+            ->where('uuid', '=', 'evt00000004')->first();
+        self::assertSame(
+            ['reason' => 'support override'],
+            json_decode((string) $manualRow['data'], true)
+        );
     }
 
     public function testPlansGainScopeColumnsAndScopedUnique(): void

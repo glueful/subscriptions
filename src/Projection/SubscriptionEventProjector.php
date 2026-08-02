@@ -27,15 +27,27 @@ use Psr\Log\LoggerInterface;
  * `subscription_provider_event_receipts` on (provider_gateway,
  * provider_logical_event_key) -- that unique index, not the subscription_events
  * insert, is the real idempotency gate. A duplicate/concurrent delivery that loses
- * the claim rolls the whole transaction back and never re-projects. Once claimed,
- * the receipt is always settled before the transaction ends: `markRejected()` for
- * an event that fails subject/plan validation (which COMMITS -- a rejection is a
- * diagnosable outcome, not an error) or `markAccepted()` alongside the
- * subscription_events append and the state-machine write (all atomic). Only a
- * genuine transient failure (anything that is not a unique violation) propagates
- * out of the transaction uncaught, rolling everything back -- including the
- * pending receipt -- so the provider's retry of the same logical event can
- * succeed later.
+ * the claim rolls the whole transaction back and never re-projects.
+ *
+ * Once claimed, resolution splits by DETERMINISM (spec ruling, fix round 2):
+ * - Deterministic rejections (missing_subject, invalid_subject,
+ *   plan_scope_mismatch, subject_mismatch) will fail the exact same way on
+ *   every redelivery, so they are caught here as {@see RejectedProviderEventException},
+ *   settle the receipt `rejected`, and COMMIT -- a rejection is a diagnosable
+ *   outcome, not an error.
+ * - "Unmapped" is NOT deterministic -- the local subscription may simply not
+ *   exist YET -- so it is a {@see UnmappedProviderSubscriptionException}
+ *   (retryable) that is left UNCAUGHT here: it propagates out of the
+ *   transaction, rolling back the whole thing (the pending receipt claim
+ *   included), and out of project() itself, so a caller that lets it surface
+ *   as a retry-inducing webhook response gets a real retry once the local
+ *   side catches up.
+ * - Accepted events append the subscription_events row and the state-machine
+ *   write, then `markAccepted()`, all atomically.
+ * - Any OTHER genuine transient failure (not a unique violation, not one of
+ *   the two exceptions above) also propagates out of the transaction
+ *   uncaught, rolling everything back so the provider's retry of the same
+ *   logical event can succeed later.
  */
 final class SubscriptionEventProjector implements SubscriptionEventProjectorInterface
 {
@@ -75,7 +87,7 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                 'provider_gateway' => $gateway,
                 'provider_logical_event_key' => $logicalKey !== '' ? $logicalKey : null,
                 'event_type' => $type,
-                'data' => ProviderReceiptData::sanitize($normalized),
+                'data' => ProviderEventData::sanitize($normalized),
             ],
             $this->candidateIdentity($normalized)
         );
@@ -86,11 +98,15 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                     // (1) CLAIM -- throws on (provider_gateway, provider_logical_event_key) duplicate.
                     $this->receipts->insertPending($this->context, $pendingRow);
 
-                    // (2) RESOLVE -- only the claim winner reaches here.
-                    [$sub, $rejectionCode] = $this->resolveTarget($gateway, $type, $normalized);
-                    if ($sub === null) {
-                        /** @var string $rejectionCode */
-                        $this->receipts->markRejected($this->context, $receiptUuid, $rejectionCode);
+                    // (2) RESOLVE -- only the claim winner reaches here. A deterministic
+                    // rejection is caught HERE (settles + commits); an unmapped
+                    // subscription (RejectedProviderEventException's sibling,
+                    // UnmappedProviderSubscriptionException) is NOT caught here and
+                    // propagates out, rolling this whole transaction back.
+                    try {
+                        $sub = $this->resolveTarget($gateway, $type, $normalized);
+                    } catch (RejectedProviderEventException $rejection) {
+                        $this->receipts->markRejected($this->context, $receiptUuid, $rejection->rejectionCode);
                         return; // rejected receipts COMMIT -- nothing else changes.
                     }
 
@@ -110,7 +126,7 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                         'source' => 'provider_event',
                         'provider_gateway' => $gateway !== '' ? $gateway : null,
                         'provider_logical_event_key' => $logicalKey !== '' ? $logicalKey : null,
-                        'data' => $normalized,
+                        'data' => ProviderEventData::sanitize($normalized),
                     ]);
 
                     if ($changes !== []) {
@@ -139,7 +155,10 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
 
                 return; // a concurrent/duplicate delivery already owns this logical event
             }
-            throw $e; // transient failure -> whole transaction rolled back, propagate for retry
+            // Transient failure OR UnmappedProviderSubscriptionException: the whole
+            // transaction rolled back (pending receipt included); propagate so the
+            // caller can retry (unmapped) or surface the failure (transient).
+            throw $e;
         }
     }
 
@@ -168,14 +187,17 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
      *
      * - Already linked (found by provider_gateway/provider_subscription_id): any
      *   subject metadata present on the event is cross-checked against the row's
-     *   stored triple; a mismatch rejects (`subject_mismatch`).
-     * - Not linked, non-created type: nothing to recover -> `unmapped_subscription`.
+     *   stored triple; a mismatch throws RejectedProviderEventException('subject_mismatch').
+     * - Not linked, non-created type: nothing to recover -> throws
+     *   UnmappedProviderSubscriptionException (retryable).
      * - Not linked, `subscription.created`: attempted recovery via metadata,
      *   see recoverCreatedSubscription().
      *
      * @param array<string,mixed> $normalized
-     * @return array{0: array<string,mixed>|null, 1: string|null} the resolved row,
-     *         or null plus an allowlisted rejection code.
+     * @return array<string,mixed> the resolved row.
+     * @throws RejectedProviderEventException a deterministic, committed rejection.
+     * @throws UnmappedProviderSubscriptionException retryable -- rolls the whole
+     *         transaction back.
      */
     private function resolveTarget(string $gateway, string $type, array $normalized): array
     {
@@ -186,16 +208,24 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             : null;
 
         if ($sub !== null) {
-            $mismatch = $this->crossCheckMetadataSubject($sub, $normalized);
+            $this->crossCheckMetadataSubject($sub, $normalized);
 
-            return $mismatch !== null ? [null, $mismatch] : [$sub, null];
+            return $sub;
         }
 
         if ($type !== 'subscription.created' || $gateway === '' || $gwSubId === null) {
-            return [null, 'unmapped_subscription'];
+            throw $this->unmapped();
         }
 
         return $this->recoverCreatedSubscription($gateway, $gwSubId, $normalized);
+    }
+
+    private function unmapped(): UnmappedProviderSubscriptionException
+    {
+        return new UnmappedProviderSubscriptionException(
+            'Provider event does not map to any subscription yet; retry once the local '
+            . 'subscription exists (or the relink target is unambiguous).'
+        );
     }
 
     /**
@@ -207,8 +237,9 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
      *
      * @param array<string,mixed> $sub
      * @param array<string,mixed> $normalized
+     * @throws RejectedProviderEventException 'subject_mismatch' on disagreement.
      */
-    private function crossCheckMetadataSubject(array $sub, array $normalized): ?string
+    private function crossCheckMetadataSubject(array $sub, array $normalized): void
     {
         $metadata = is_array($normalized['metadata'] ?? null) ? $normalized['metadata'] : [];
 
@@ -228,11 +259,9 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
 
             $stored = isset($sub[$column]) ? (string) $sub[$column] : '';
             if ($given !== $stored) {
-                return 'subject_mismatch';
+                throw new RejectedProviderEventException('subject_mismatch');
             }
         }
-
-        return null;
     }
 
     /**
@@ -251,7 +280,9 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
      * out of the box, matching the 1.x relink recovery it supersedes.
      *
      * @param array<string,mixed> $normalized
-     * @return array{0: array<string,mixed>|null, 1: string|null}
+     * @return array<string,mixed> the resolved (and now possibly relinked) row.
+     * @throws RejectedProviderEventException missing_subject or invalid_subject.
+     * @throws UnmappedProviderSubscriptionException retryable -- see relinkTenantSubscription().
      */
     private function recoverCreatedSubscription(string $gateway, string $gwSubId, array $normalized): array
     {
@@ -259,7 +290,7 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
 
         $tenantUuid = $this->scalarOrNull($metadata['tenant_uuid'] ?? null) ?? '';
         if ($tenantUuid === '') {
-            return [null, 'missing_subject'];
+            throw new RejectedProviderEventException('missing_subject');
         }
 
         $subjectType = $this->scalarOrNull($metadata['subject_type'] ?? null);
@@ -271,19 +302,19 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             $subjectUuid = $tenantUuid;
         } elseif ($subjectType === null || $subjectUuid === null) {
             // One of the pair given without the other: incomplete, never defaulted.
-            return [null, 'missing_subject'];
+            throw new RejectedProviderEventException('missing_subject');
         }
 
         $subject = new Subject($tenantUuid, $subjectType, $subjectUuid);
         if (!$this->subjects->validate($this->context, $subject)) {
-            return [null, 'invalid_subject'];
+            throw new RejectedProviderEventException('invalid_subject');
         }
 
         // 1.x relink recovery survives ONLY for validated tenant subjects (spec's
         // scope for Task 10) -- a validated user subject has no recovery mechanism
         // here and is treated the same as any other unmapped subscription.
         if ($subject->type !== SubjectType::TENANT) {
-            return [null, 'unmapped_subscription'];
+            throw $this->unmapped();
         }
 
         return $this->relinkTenantSubscription($gateway, $gwSubId, $subject);
@@ -296,14 +327,18 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
      * DIFFERENT provider subscription is NEVER moved -- refused and logged as an
      * anomaly, exactly as before.
      *
-     * @return array{0: array<string,mixed>|null, 1: string|null}
+     * @return array<string,mixed>
+     * @throws RejectedProviderEventException plan_scope_mismatch.
+     * @throws UnmappedProviderSubscriptionException retryable: no row exists for
+     *         this tenant (yet), or the row is linked to a different provider
+     *         subscription and the link is refused.
      */
     private function relinkTenantSubscription(string $gateway, string $gwSubId, Subject $subject): array
     {
         $tenantUuid = $subject->tenantUuid;
         $existing = $this->subscriptions->findByTenant($this->context, $tenantUuid);
         if ($existing === null) {
-            return [null, 'unmapped_subscription'];
+            throw $this->unmapped();
         }
 
         $existingSubId = $this->scalarOrNull($existing['provider_subscription_id'] ?? null) ?? '';
@@ -328,20 +363,26 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                 'incoming_subscription_id' => $gwSubId,
             ]);
 
-            return [null, 'unmapped_subscription'];
+            throw $this->unmapped();
         }
 
-        [, $rejectionCode] = $this->requireCoherentPlan($existing, $subject);
-        if ($rejectionCode !== null) {
-            return [null, $rejectionCode];
-        }
+        $this->requireCoherentPlan($existing, $subject); // throws RejectedProviderEventException if not coherent
 
         $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
             'provider_gateway' => $gateway,
             'provider_subscription_id' => $gwSubId,
         ]);
 
-        return [$this->subscriptions->findByTenant($this->context, $tenantUuid), null];
+        $relinked = $this->subscriptions->findByTenant($this->context, $tenantUuid);
+        if ($relinked === null) {
+            // Invariant violation, not a normal outcome: the row we just updated,
+            // inside this same transaction, must still be readable back.
+            throw new \RuntimeException(
+                "Subscription for tenant '{$tenantUuid}' vanished mid-transaction after relink update."
+            );
+        }
+
+        return $relinked;
     }
 
     /**
@@ -352,7 +393,13 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
      * audience/owner entirely.
      *
      * @param array<string,mixed> $sub
-     * @return array{0: array<string,mixed>|null, 1: string|null}
+     * @return array<string,mixed> the given $sub, unchanged, when coherent.
+     * @throws RejectedProviderEventException plan_scope_mismatch. NOTE: a
+     *         genuinely transient plan-lookup failure (e.g. the plans table is
+     *         momentarily unreachable) is NOT this -- PlanCatalog::planForUuid()
+     *         no longer swallows \Throwable into a null "not found" result, so
+     *         that kind of failure propagates past this method uncaught instead
+     *         of being misreported as a deterministic, committed rejection.
      */
     private function requireCoherentPlan(array $sub, Subject $subject): array
     {
@@ -368,10 +415,10 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             || (string) ($plan['audience'] ?? '') !== $audience
             || (string) ($plan['owner_tenant_uuid'] ?? '') !== $owner
         ) {
-            return [null, 'plan_scope_mismatch'];
+            throw new RejectedProviderEventException('plan_scope_mismatch');
         }
 
-        return [$sub, null];
+        return $sub;
     }
 
     /**

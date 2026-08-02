@@ -5,7 +5,13 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Projection;
 
 /**
- * The ONLY path into `subscription_provider_event_receipts.data` (spec §2/§8/Task 10).
+ * The ONLY path into a provider-sourced `data` column -- both
+ * `subscription_provider_event_receipts.data` and, on the accepted path,
+ * provider-sourced `subscription_events.data` (spec §2/§8/Task 10 fix round 2).
+ * Ownership-neutral name: the same closed projection is shared by both writers,
+ * so it isn't named after either one. Manual/reconcile `subscription_events`
+ * rows are UNCHANGED by this class -- their `data` is app-generated, never a raw
+ * provider payload, so there is nothing to sanitize.
  *
  * A raw provider webhook payload is never stored verbatim -- it commonly carries
  * customer PII (email, billing address) and, depending on the provider/integration,
@@ -18,8 +24,13 @@ namespace Glueful\Extensions\Subscriptions\Projection;
  * rejection -- is defense in depth for the rare case where an allowlisted field's
  * VALUE is itself a hostile nested structure (a provider or a compromised
  * upstream echoing a credential back inside a field this class otherwise trusts).
+ *
+ * Also used by migration 006 (`SubjectModel::sanitizeHistoricalProviderEventData()`)
+ * to sanitize pre-existing provider-sourced `subscription_events.data` rows in
+ * place during the upgrade, so migrating never leaves historical PII/secrets
+ * sitting in the database.
  */
-final class ProviderReceiptData
+final class ProviderEventData
 {
     private const TOP_LEVEL_ALLOW = ['gateway_subscription_id', 'status', 'current_period_end', 'metadata'];
     private const METADATA_ALLOW = ['tenant_uuid', 'subject_type', 'subject_uuid', 'plan_uuid'];

@@ -4,20 +4,22 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Subscriptions\Tests\Unit;
 
-use Glueful\Extensions\Subscriptions\Projection\ProviderReceiptData;
+use Glueful\Extensions\Subscriptions\Projection\ProviderEventData;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Task 10: ProviderReceiptData::sanitize() is the ONLY path into
- * `receipts.data` -- a closed allowlist (never a denylist) of exactly the
- * fields diagnosis needs, plus a recursive secret-key rejection as defense
- * in depth against a hostile/careless provider payload.
+ * Task 10 (renamed in fix round 2): ProviderEventData::sanitize() is the ONLY
+ * path into a provider-sourced `data` column -- receipts.data AND, on the
+ * accepted path, provider-sourced subscription_events.data -- a closed
+ * allowlist (never a denylist) of exactly the fields diagnosis needs, plus a
+ * recursive secret-key rejection as defense in depth against a
+ * hostile/careless provider payload.
  */
-final class ProviderReceiptDataTest extends TestCase
+final class ProviderEventDataTest extends TestCase
 {
     public function testKeepsOnlyTheAllowlistedTopLevelFields(): void
     {
-        $sanitized = ProviderReceiptData::sanitize([
+        $sanitized = ProviderEventData::sanitize([
             'gateway_subscription_id' => 'sub_1',
             'status' => 'active',
             'current_period_end' => '2030-01-01 00:00:00',
@@ -34,7 +36,7 @@ final class ProviderReceiptDataTest extends TestCase
 
     public function testMetadataIsRestrictedToTheFourIdentityFields(): void
     {
-        $sanitized = ProviderReceiptData::sanitize([
+        $sanitized = ProviderEventData::sanitize([
             'metadata' => [
                 'tenant_uuid' => 'tenantA',
                 'subject_type' => 'tenant',
@@ -57,7 +59,7 @@ final class ProviderReceiptDataTest extends TestCase
 
     public function testMetadataKeyIsOmittedEntirelyWhenNothingAllowlistedSurvives(): void
     {
-        $sanitized = ProviderReceiptData::sanitize([
+        $sanitized = ProviderEventData::sanitize([
             'status' => 'active',
             'metadata' => ['billing_email' => 'someone@example.com'],
         ]);
@@ -68,7 +70,7 @@ final class ProviderReceiptDataTest extends TestCase
 
     public function testNonArrayMetadataIsDropped(): void
     {
-        $sanitized = ProviderReceiptData::sanitize([
+        $sanitized = ProviderEventData::sanitize([
             'status' => 'active',
             'metadata' => 'not-an-array',
         ]);
@@ -83,7 +85,7 @@ final class ProviderReceiptDataTest extends TestCase
      */
     public function testRecursivelyRejectsHostileNestedSecretKeys(): void
     {
-        $sanitized = ProviderReceiptData::sanitize([
+        $sanitized = ProviderEventData::sanitize([
             'gateway_subscription_id' => [
                 'value' => 'sub_1',
                 'api_key' => 'sk_live_xxx',
@@ -117,7 +119,7 @@ final class ProviderReceiptDataTest extends TestCase
 
     public function testSecretKeyMatchingIsCaseInsensitive(): void
     {
-        $sanitized = ProviderReceiptData::sanitize([
+        $sanitized = ProviderEventData::sanitize([
             'status' => [
                 'API_KEY' => 'x',
                 'Client_Secret' => 'y',
@@ -130,12 +132,12 @@ final class ProviderReceiptDataTest extends TestCase
 
     public function testEmptyPayloadSanitizesToEmptyArray(): void
     {
-        self::assertSame([], ProviderReceiptData::sanitize([]));
+        self::assertSame([], ProviderEventData::sanitize([]));
     }
 
     public function testUnknownTopLevelKeysAreDroppedEvenWhenBenignLooking(): void
     {
-        $sanitized = ProviderReceiptData::sanitize([
+        $sanitized = ProviderEventData::sanitize([
             'gateway_subscription_id' => 'sub_1',
             'plan_key' => 'pro', // not on the allowlist
             'provider_customer_id' => 'cus_1', // not on the allowlist

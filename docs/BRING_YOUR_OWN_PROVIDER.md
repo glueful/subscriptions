@@ -96,9 +96,8 @@ The projector handles exactly these `type` strings (from
 Any **other** `type` that still maps to an existing subscription is **recorded
 (idempotency claim) with no projection** — it becomes a first-class deduped log
 entry instead of being silently dropped. An event that does **not** map to any
-subscription still claims its receipt, which is settled `rejected` with an
-allowlisted code (see [§ metadata and subject validation](#metadata-and-subject-validation))
-instead of touching subscription state.
+subscription throws `UnmappedProviderSubscriptionException` instead — see
+[§ metadata and subject validation](#metadata-and-subject-validation).
 
 ### `normalized` keys
 
@@ -107,7 +106,7 @@ All keys are optional except where noted (read by `mapToSubscription()`,
 
 | Key | Required? | Notes |
 |---|---|---|
-| `gateway_subscription_id` | **Required to map** | Combined with `gateway` to find the subscription via `findByProviderSubscription`. Without it (and without a validated `metadata` recovery on a `subscription.created`), the event cannot be attached and its receipt is rejected `unmapped_subscription`. |
+| `gateway_subscription_id` | **Required to map** | Combined with `gateway` to find the subscription via `findByProviderSubscription`. Without it (and without a validated `metadata` recovery on a `subscription.created`), the event cannot be attached and `project()` throws `UnmappedProviderSubscriptionException`. |
 | `status` | optional | Must be one of `active`, `trialing`, `past_due`, `canceled`, `incomplete`, `paused` (case-insensitive). Any other value is ignored. |
 | `current_period_end` | optional | Any string `\DateTimeImmutable` can parse (datetime/timestamp). Unparseable values are ignored. |
 | `metadata` | optional | An object/array. `tenant_uuid`/`subject_type`/`subject_uuid` are read for subject validation and cross-checks (see below); everything else is ignored. |
@@ -125,17 +124,30 @@ All keys are optional except where noted (read by `mapToSubscription()`,
    `subscription_events` insert — is the real idempotency gate. If a concurrent
    delivery already claimed it, the unique violation is swallowed (debug-logged)
    and the whole transaction rolls back.
-3. Once claimed, the receipt is always settled before the transaction ends:
-   `rejected` (with an allowlisted code — see below) if subject/plan validation
-   fails, or `accepted` alongside the `subscription_events` append and the
-   state-machine write. Rejection **commits** — it's a diagnosable outcome, not
-   an error. Only a genuine transient failure (anything that isn't a unique
-   violation) rolls the whole transaction back, pending receipt included, so the
-   provider's retry of the same logical event can succeed later.
+3. Once claimed, resolution splits by **determinism**:
+   - A deterministic validation failure (`missing_subject`, `invalid_subject`,
+     `plan_scope_mismatch`, `subject_mismatch` — see below) settles the receipt
+     `rejected` with that code and **commits**. Rejection is a diagnosable
+     outcome, not an error — it will fail the exact same way on every retry.
+   - An **unmapped** subscription is different: the local side may simply not
+     exist YET, so `project()` throws `UnmappedProviderSubscriptionException`
+     and the WHOLE transaction rolls back — pending receipt claim included.
+     **Your webhook endpoint MUST let this exception surface as a
+     retry-inducing response** (a 5xx, or whatever your provider treats as
+     "redeliver this event"); catching it and still returning 2xx would
+     acknowledge the webhook while silently discarding the event, since the
+     receipt claim was just rolled back along with everything else.
+   - Otherwise: `accepted`, alongside the `subscription_events` append and the
+     state-machine write, all atomically.
+   - Any OTHER genuine transient failure also rolls the whole transaction back
+     (pending receipt included) and propagates, so the provider's retry of the
+     same logical event can succeed later.
 
 So the same logical event delivered twice (or concurrently) projects exactly
 once. Give each distinct logical event a distinct key, and give retries of the
-same event the same key.
+same event the same key — including retries driven by
+`UnmappedProviderSubscriptionException` or a transient failure, both of which
+leave the claim free to be retried.
 
 ### `metadata` and subject validation
 
@@ -148,29 +160,33 @@ yet linked to any row**, `metadata` is the ONLY way to establish a new link:
 - `metadata['tenant_uuid']` is required. `metadata['subject_type']` /
   `metadata['subject_uuid']` may be omitted (defaults to the tenant self-subject,
   the 1.x shape) but if `subject_type` is given, `subject_uuid` must be too.
-  Missing/incomplete → rejected `missing_subject`.
+  Missing/incomplete → **committed** rejection `missing_subject`.
 - The resulting subject must pass `SubjectResolverInterface::validate()` (the
   shipped `DefaultSubjectResolver` rejects every **user** subject). Failing →
-  rejected `invalid_subject`.
+  **committed** rejection `invalid_subject`.
 - The relink recovery below runs **only** for a validated **tenant** subject; a
-  validated user subject has no recovery path here → rejected
-  `unmapped_subscription`.
+  validated user subject has no recovery path here → **retryable**
+  `UnmappedProviderSubscriptionException` (the local side may simply not have a
+  membership row for this user yet).
 - The target row's plan must actually be assignable to the resolved subject's
-  scope (a tenant subject needs a platform plan). Mismatch → rejected
-  `plan_scope_mismatch`.
-- No existing row for that tenant at all → rejected `unmapped_subscription`.
+  scope (a tenant subject needs a platform plan). Mismatch → **committed**
+  rejection `plan_scope_mismatch`.
+- No existing row for that tenant at all → **retryable**
+  `UnmappedProviderSubscriptionException` (the tenant's local subscription may
+  not exist yet, e.g. checkout hasn't completed).
 
 The relink itself will **never move an existing link**: if the target row is
 already linked to a *different* provider subscription, the projector logs a
-relink-conflict anomaly and rejects (`unmapped_subscription`). It does not relink
-based on provider-echoed metadata alone. (A server-issued correlation token is
-the proper long-term mechanism, but that is an app-side concern, out of scope
-here.)
+relink-conflict anomaly and throws `UnmappedProviderSubscriptionException`
+(**retryable** — but the link is never moved, on this attempt or any retry, as
+long as the conflict persists). It does not relink based on provider-echoed
+metadata alone. (A server-issued correlation token is the proper long-term
+mechanism, but that is an app-side concern, out of scope here.)
 
 **On any event that already maps to a linked row** (found via
 `gateway`/`gateway_subscription_id`), any subject fields present in `metadata`
-are cross-checked against that row's stored subject triple — a mismatch rejects
-(`subject_mismatch`) rather than being silently ignored.
+are cross-checked against that row's stored subject triple — a mismatch is a
+**committed** rejection (`subject_mismatch`) rather than being silently ignored.
 
 ---
 

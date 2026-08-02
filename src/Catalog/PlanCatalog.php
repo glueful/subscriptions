@@ -218,18 +218,27 @@ final class PlanCatalog
         }
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * Deliberately does NOT swallow \Throwable (spec ruling, Task 10 fix round 2):
+     * `planForUuid()` and its siblings are used by SubscriptionEventProjector's
+     * plan-audience coherence check to decide between a deterministic, COMMITTED
+     * `plan_scope_mismatch` rejection and letting a failure propagate for a
+     * transaction rollback+retry. Swallowing every \Throwable here (as the
+     * plan-key lookups above still do -- they are unrelated to that decision)
+     * would turn a genuinely transient plans-table read failure into "plan not
+     * found", silently committing a rejection that a retry could have avoided.
+     * The `$this->context === null` guard above still covers the legitimate
+     * "not configured for DB resolution" construction path.
+     *
+     * @return array<string,mixed>|null
+     */
     private function dbPlanByUuid(string $planUuid): ?array
     {
         if ($this->context === null || $this->plans === null) {
             return null;
         }
 
-        try {
-            return $this->plans->findByUuid($this->context, $planUuid);
-        } catch (\Throwable) {
-            return null;
-        }
+        return $this->plans->findByUuid($this->context, $planUuid);
     }
 
     private function dbMaxUpdatedAt(): ?string

@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Database\Migrations;
 
 use Glueful\Database\Migrations\MigrationInterface;
 use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
+use Glueful\Extensions\Subscriptions\Projection\ProviderEventData;
 
 /**
  * Subject-model migration (design spec §2): generalizes the tenant-only 1.x
@@ -71,6 +72,7 @@ final class SubjectModel implements MigrationInterface
 
         $this->createReceiptsTable($schema);
         $this->backfillReceipts($schema);
+        $this->sanitizeHistoricalProviderEventData($schema);
     }
 
     public function down(SchemaBuilderInterface $schema): void
@@ -307,6 +309,51 @@ final class SubjectModel implements MigrationInterface
             . 'FROM subscription_events '
             . 'WHERE provider_gateway IS NOT NULL AND provider_logical_event_key IS NOT NULL'
         );
+    }
+
+    /**
+     * Spec ruling (Task 10 fix round 2): the upgrade itself must not leave
+     * historical PII/secrets sitting in the database. Every PROVIDER-sourced
+     * `subscription_events` row (non-null gateway AND logical key -- the same
+     * predicate backfillReceipts() uses) may carry a raw provider payload in
+     * `data` written before ProviderEventData::sanitize() existed. Each such
+     * row's `data` is re-projected through sanitize() and written back in
+     * place. Manual/reconcile events (gateway/key null) are untouched -- their
+     * data is app-generated, never a raw provider payload.
+     *
+     * PHP-side (not portable SQL) because the sanitization logic itself lives
+     * in application code, not the database. Naturally idempotent: sanitizing
+     * an already-safe payload is a no-op, so a re-run (or a second migration
+     * attempt after an unrelated abort) converges to the same result rather
+     * than double-transforming anything.
+     */
+    private function sanitizeHistoricalProviderEventData(SchemaBuilderInterface $schema): void
+    {
+        $pdo = $schema->getConnection()->getPDO();
+
+        $rows = $pdo->query(
+            'SELECT uuid, data FROM subscription_events '
+            . 'WHERE provider_gateway IS NOT NULL AND provider_logical_event_key IS NOT NULL '
+            . 'AND data IS NOT NULL'
+        )->fetchAll(\PDO::FETCH_ASSOC);
+
+        if ($rows === []) {
+            return;
+        }
+
+        $update = $pdo->prepare('UPDATE subscription_events SET data = :data WHERE uuid = :uuid');
+
+        foreach ($rows as $row) {
+            $decoded = json_decode((string) $row['data'], true);
+            if (!is_array($decoded)) {
+                continue; // unparseable/non-object data -- nothing safe to reconstruct, leave as-is
+            }
+
+            $update->execute([
+                'data' => json_encode(ProviderEventData::sanitize($decoded), JSON_THROW_ON_ERROR),
+                'uuid' => $row['uuid'],
+            ]);
+        }
     }
 
     // ===========================================
