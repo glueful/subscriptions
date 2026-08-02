@@ -16,7 +16,17 @@ scope and on the roadmap.
 composer require glueful/subscriptions
 php glueful extensions:enable subscriptions
 php glueful migrate:run
+php glueful subscriptions:plans:import-config
 ```
+
+The import step is **required**, not optional: since 2.0 the plan catalog is
+database-authoritative and `config('subscriptions.plans')` is only a *seed*, so
+until it is imported `subscription_plans` is empty and **every entitlement
+resolves to an empty map**. The command is create-missing and safe to re-run
+(it never overwrites an edited plan) -- re-run it whenever you add a plan to
+config. If you skip it, the resolver logs an explicit
+`subscriptions.default_plan_unresolvable` error naming the unresolvable
+`default_plan` and this command.
 
 Requires `glueful/framework ^1.55.0`. (The `Glueful\Entitlements` seam and the
 container-precedence fix this extension relies on shipped in 1.54.0; 1.55.0 is
@@ -61,6 +71,33 @@ installed**. Both are soft dependencies, probed at runtime via `class_exists`:
   bridge) degrade: the middleware fails closed with 403 by default (opt out via
   `subscriptions.permissive_middleware`), the tier bridge delegates to the
   framework's default resolver.
+
+### Note for tenancy hosts (new in 2.0)
+
+2.0 preserves every 1.x *API* unchanged, but if you run `glueful/tenancy` (or
+anything else binding the `TenantTableRegistry` / `TenantContextRunner`
+contracts) two things about the integration are new:
+
+- **Table registration.** Boot registers exactly `subscriptions`,
+  `subscription_overrides`, and `subscription_events` as tenant-owned tables, so
+  your tenancy layer can scope, stamp, and purge them. `subscription_plans` and
+  `subscription_provider_event_receipts` are deliberately **not** registered:
+  the plan catalog is platform/workspace-scoped by its own
+  `(audience, owner_tenant_uuid)` columns, and receipts are claimed before any
+  tenant is known.
+- **Entitlement reads run in system mode.** Because those three tables are
+  registered, an ambient tenant would otherwise be injected into every read of
+  them. Both `EntitlementResolver::resolveMap()` and
+  `MemberEntitlementResolver::resolveMap()` (like
+  `SubscriptionEventProjector::project()`) therefore run their repository reads
+  through `TenantContextRunner::runAsSystem()`. This is correct and deliberate:
+  those APIs are explicitly *parameterized* by tenant -- resolving another
+  tenant's entitlements from a job, a CLI, or a request running in a different
+  tenant's context is a documented, supported call -- and their `WHERE` clauses
+  already pin the exact subject triple. Without it, a cross-tenant
+  `allows($otherTenant, ...)` would silently return an empty map. Writes
+  (`SubscriptionService`'s `…For()` methods) still run through
+  `runAsTenant($subject->tenantUuid, ...)`.
 
 ## Checking entitlements
 
@@ -204,8 +241,61 @@ return [
 
 A lapsed tenant (canceled / incomplete / past_due beyond grace) downgrades to
 `default_plan` -- it is never locked out; paid entitlements simply fall away.
-Per-tenant overrides (the `subscription_overrides` table) win per key and may
-carry an expiry.
+
+## Entitlement overrides
+
+Overrides (the `subscription_overrides` table) win per key over whatever the
+plan grants, and may carry an expiry. Since 2.0 an override belongs to a
+**subject**, not to a tenant: the row's identity is the full triple
+`(tenant_uuid, subject_type, subject_uuid)` plus `entitlement`, which is exactly
+the table's unique key (`uniq_override_subject_entitlement`).
+
+Use the shipped writer -- it is the supported way to write this table:
+
+```php
+use Glueful\Extensions\Subscriptions\Repositories\OverrideRepository;
+use Glueful\Extensions\Subscriptions\Subject;
+
+$overrides = new OverrideRepository();
+
+// A workspace-level override (the 1.x meaning: the tenant's own subject).
+$overrides->upsertForSubject($context, Subject::tenant($tenantUuid), 'projects.limit', 500);
+
+// A member-level override, scoped to one user inside one workspace.
+$overrides->upsertForSubject(
+    $context,
+    Subject::user($tenantUuid, $userUuid),
+    'content.premium',
+    false,                              // a DENY override
+    expiresAt: '2026-12-31 23:59:59',   // optional
+    reason: 'chargeback hold',          // optional
+);
+
+$overrides->deleteForSubject($context, Subject::tenant($tenantUuid), 'projects.limit');
+```
+
+`upsertForSubject()` inserts or updates the one row identified by that unique,
+generates the `uuid`, and json-encodes the value, so booleans, numbers, strings
+and arrays all round-trip.
+
+> **Writing the table directly? You must supply the subject columns.**
+> 1.x shipped no writer, so hosts inserted
+> `(uuid, tenant_uuid, entitlement, value)` by hand. Migration `006` adds
+> `subject_type`/`subject_uuid` with defaults `'tenant'`/`''`, and reads match on
+> the **full triple** -- so a 1.x-shaped insert lands with `subject_uuid = ''`,
+> matches no subject, and is silently ignored. A **deny** override written that
+> way therefore GRANTS. A direct insert must now look like:
+>
+> ```sql
+> INSERT INTO subscription_overrides
+>   (uuid, tenant_uuid, subject_type, subject_uuid, entitlement, value, expires_at, reason)
+> VALUES
+>   ('nano12charsid', :tenant_uuid, 'tenant', :tenant_uuid, 'projects.limit', '500', NULL, 'comped');
+> ```
+>
+> For a workspace's own override, `subject_type = 'tenant'` and
+> `subject_uuid = tenant_uuid`. For a member, `subject_type = 'user'` and
+> `subject_uuid = <user uuid>`. `value` is JSON (`'500'`, `'true'`, `'"gold"'`).
 
 ## Lifecycle via SubscriptionService
 
@@ -528,15 +618,29 @@ and provider-event receipt management. 1.4.0 is additive with no behavior change
    php glueful migrate:run
    ```
 
+4. Import the plan catalog -- **required**, see [Install](#install):
+   ```bash
+   php glueful subscriptions:plans:import-config
+   ```
+   (`subscriptions:prepare-v2` in step 2 already imports the plans that existed
+   at that point; re-run the import for anything added to config afterwards. An
+   unimported catalog resolves every entitlement to an empty map.)
+
+5. Review the override table if you write it directly. Post-`006`, inserts must
+   supply `subject_type` + `subject_uuid` or the row is silently ignored -- see
+   [Entitlement overrides](#entitlement-overrides).
+
+6. (Optional) Enable memberships. 2.0 alone changes nothing about your existing
+   tenant-facing **API** -- every 1.x call (`SubscriptionService::start()`,
+   `current()`, `changePlan()`, ...) is preserved byte-for-byte as a facade over
+   the new subject-aware core, and the default `SubjectResolverInterface`
+   rejects every `user` subject. (Two integration-level changes do land for
+   tenancy hosts -- table registration and system-mode entitlement reads; see
+   [Note for tenancy hosts](#note-for-tenancy-hosts-new-in-20).) If you want the
+   new workspace-membership product, bind your own `SubjectResolverInterface`
+   (see [Enabling memberships](#enabling-memberships)) -- **binding the resolver
+   is the enablement switch**; there is no config flag to flip.
+
 The preparation marker protects 2.0 migration `006` from running without first
 validating that all subscriptions can be resolved. No subscriptions are modified
 by 1.4.0; all existing behavior is preserved until 2.0 migration completes.
-
-4. (Optional) Enable memberships. 2.0 alone changes **nothing** about your
-   existing tenant-facing behavior -- every 1.x call (`SubscriptionService::start()`,
-   `current()`, `changePlan()`, ...) is preserved byte-for-byte as a facade over
-   the new subject-aware core, and the default `SubjectResolverInterface`
-   rejects every `user` subject. If you want the new workspace-membership
-   product, bind your own `SubjectResolverInterface` (see
-   [Enabling memberships](#enabling-memberships)) -- **binding the resolver is
-   the enablement switch**; there is no config flag to flip.

@@ -31,12 +31,48 @@ for the full rationale.
   A populated `subscriptions` table requires exactly one 1.4.0 preparation
   marker before `006` makes its first schema change; missing or duplicate
   state throws before any DDL runs.
+- **Direct `subscription_overrides` inserts MUST now supply `subject_type` and
+  `subject_uuid`.** 1.x shipped no writer for this table, so hosts insert into
+  it directly. Migration `006` adds the two subject columns with defaults
+  `'tenant'` / `''`, and every read (`OverrideRepository::activeForSubject()`,
+  which `activeForTenant()` delegates to) matches on the **full triple**
+  `(tenant_uuid, subject_type, subject_uuid)`. A 1.x-shaped insert therefore
+  lands with `subject_uuid = ''`, matches no subject, and is **silently
+  ignored** -- so a *deny* override written that way stops denying and the plan
+  value GRANTS. For a workspace's own override write
+  `subject_type = 'tenant'`, `subject_uuid = <tenant_uuid>`; for a member,
+  `subject_type = 'user'`, `subject_uuid = <user_uuid>`. 2.0 ships the
+  supported writer so this never has to be hand-rolled:
+  `OverrideRepository::upsertForSubject($context, $subject, $entitlement,
+  $value, $expiresAt = null, $reason = null)` and
+  `OverrideRepository::deleteForSubject($context, $subject, $entitlement)` --
+  see [Entitlement overrides](README.md#entitlement-overrides).
 - **DB-authoritative plan catalog -- config plans are seeds only.**
   `config('subscriptions.plans')` is no longer overlaid onto the database at
   resolve time; the database is the single authority for `PlanCatalog`. A new
   config plan added after upgrading to 2.0 has **no effect** until it is
   imported: run `subscriptions:plans:import-config` (create-missing, safe to
-  re-run). There is no boot-time or request-time auto-import.
+  re-run). There is no boot-time or request-time auto-import. This also makes
+  the import a **required install step on a fresh install**, not just on
+  upgrade: with an empty `subscription_plans` table every entitlement resolves
+  to an empty map. `EntitlementResolver` logs an explicit
+  `subscriptions.default_plan_unresolvable` error (naming the unresolvable
+  `default_plan` and the import command) when the platform catalog has no row
+  for `default_plan`; it deliberately does not throw -- entitlement checks stay
+  fail-closed-not-fatal.
+- **Tenancy hosts: entitlement reads now run in system mode.** Boot registers
+  `subscriptions`, `subscription_overrides`, and `subscription_events` with a
+  bound `TenantTableRegistry`, so a tenancy layer scopes/stamps/purges them.
+  Because of that registration, `EntitlementResolver::resolveMap()` and
+  `MemberEntitlementResolver::resolveMap()` run their repository reads through
+  `TenantContextRunner::runAsSystem()` (as `SubscriptionEventProjector::project()`
+  already did): both APIs are explicitly *parameterized* by tenant, and their
+  `WHERE` clauses already pin the exact subject triple, so ambient tenant
+  injection could only narrow a legitimate cross-tenant read
+  (`DefaultEntitlementChecker::allows($otherTenant, ...)` from a job, a CLI, or
+  another tenant's request) to a silently empty map. Writes still run through
+  `runAsTenant($subject->tenantUuid, ...)`. No change for hosts without a
+  tenancy package -- both helpers degrade to a direct call.
 - **Scoped plan keys + immutable `plan_key` + `plan_uuid` references.**
   `subscription_plans` drops `UNIQUE(plan_key)` for
   `UNIQUE(audience, owner_tenant_uuid, plan_key)`, so a workspace's member
@@ -94,12 +130,24 @@ config. Upgrade through the 1.4.0 bridge:
    composer require "glueful/subscriptions:^2.0"
    php glueful migrate:run
    ```
-4. End the maintenance window. Every 1.x call (`current()`, `start()`,
+4. Import anything added to `subscriptions.plans` since step 2 -- the catalog
+   is database-authoritative, so an unimported plan does not exist:
+   ```bash
+   php glueful subscriptions:plans:import-config
+   ```
+5. If you write `subscription_overrides` directly, update those inserts to
+   supply `subject_type` + `subject_uuid` (or switch to
+   `OverrideRepository::upsertForSubject()`) -- see the breaking-changes entry
+   above. A 1.x-shaped insert is silently ignored after `006`.
+6. End the maintenance window. Every 1.x call (`current()`, `start()`,
    `changePlan()`, `cancel()`, `reconcile()`) is preserved as a facade over the
    new subject-aware core with unchanged signatures and behavior, and the
    default `SubjectResolverInterface` rejects every `user` subject, so 2.0
-   alone changes nothing about existing tenant-facing behavior.
-5. (Optional) Enable workspace memberships by binding your own
+   alone changes nothing about the existing tenant-facing **API**. Two
+   integration-level changes do land for hosts running a tenancy package --
+   tenant-table registration and system-mode entitlement reads; see the
+   "Tenancy hosts" breaking-changes entry above.
+7. (Optional) Enable workspace memberships by binding your own
    `SubjectResolverInterface` that can vouch for real users -- **binding the
    resolver is the enablement switch**; there is no config flag. See
    [Enabling memberships](README.md#enabling-memberships).
@@ -173,6 +221,44 @@ Full details in [Upgrading to 2.0](README.md#upgrading-to-20).
   `SubjectResolverInterface` remains bound to `DefaultSubjectResolver`, shared
   and host-overridable -- binding a host resolver that can vouch for real users
   is what enables workspace memberships; there is no config flag for it.
+- **A supported override writer.** `OverrideRepository::upsertForSubject()`
+  (insert-or-update on the subject-scoped unique; generates the `uuid`,
+  json-encodes the value, optional `expiresAt`/`reason`) and
+  `deleteForSubject()` (no-op when absent). 1.x shipped no writer at all, which
+  is why post-`006` hand-rolled inserts are a documented breaking change.
+- **A fresh-install diagnostic.** `EntitlementResolver` logs an
+  `subscriptions.default_plan_unresolvable` **error** when the platform catalog
+  cannot resolve `default_plan`, naming the key and
+  `subscriptions:plans:import-config`. Logged once per resolve (cache-miss path),
+  via the same defensive logger lookup used elsewhere -- never a throw, never a
+  hard dependency on a logger binding.
+
+### Fixed
+
+- **Provider-sourced strings are clamped to their column widths at the
+  projector boundary.** `SubscriptionEventProjector` writes raw provider
+  metadata into deliberately narrow columns (`candidate_subject_type`
+  VARCHAR(10), `candidate_plan_uuid` VARCHAR(12), `candidate_tenant_uuid`/
+  `candidate_subject_uuid` VARCHAR(64), `provider_gateway` VARCHAR(50),
+  `event_type` VARCHAR(40), `provider_logical_event_key` /
+  `provider_subscription_id` VARCHAR(191)). On strict MySQL and on PostgreSQL an
+  over-length value raised a data error *inside* the receipt-claim transaction,
+  rolling back the claim and propagating -- so a hostile or merely verbose
+  provider payload produced no receipt, no diagnosis, and an infinite webhook
+  retry loop. Every such string is now truncated (`mb_substr`, character-safe)
+  to its declared width before any read or write, so the value is clamped
+  consistently across the idempotency probe, the receipt, and the
+  `subscription_events` row.
+- **Migration `006` down() -> up() round trip on PostgreSQL.** `down()` restored
+  the three 1.x uniques through the fluent `unique()`, which compiles to
+  `CREATE UNIQUE INDEX` on pgsql; the next `up()` then failed at
+  `ALTER TABLE ... DROP CONSTRAINT`, which finds no constraint of that name.
+  `down()` now emits a real `ADD CONSTRAINT ... UNIQUE (...)` on pgsql
+  (`subscriptions_tenant_uuid_unique`, `uniq_override_tenant_entitlement`,
+  `subscription_plans_plan_key_unique`), and `up()`'s drop is tolerant of both
+  shapes (`DROP CONSTRAINT IF EXISTS` followed by `DROP INDEX IF EXISTS`) so an
+  install carrying a pre-fix `down()`'s index artifact still upgrades. MySQL and
+  SQLite are unchanged.
 
 ### Documentation
 
@@ -189,6 +275,12 @@ Full details in [Upgrading to 2.0](README.md#upgrading-to-20).
 - `config/subscriptions.php`: comments only, no key changes -- documents that
   `plans` are seed-only (no runtime overlay), `rate_tiers` is tenant-only, and
   `permissive_middleware` now governs both route middlewares.
+- README: `subscriptions:plans:import-config` is now part of the **Install**
+  steps (with the reason: the catalog is DB-authoritative, config plans are
+  seeds); a new "Entitlement overrides" section documents the subject-scoped
+  writer plus the columns a direct insert must supply; and a "Note for tenancy
+  hosts" section documents the tenant-table registration and the system-mode
+  entitlement reads.
 
 ## 1.4.0 -- 2026-08-02
 
