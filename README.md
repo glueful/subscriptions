@@ -314,3 +314,38 @@ at the cadence you want; the package does not self-schedule.
 
 "Works" for the checker always means: catalog + overrides + status gating; no
 payment object is ever consulted at check time.
+
+## Upgrading to 2.0
+
+Release 1.4.0 is the upgrade bridge from 1.x to the 2.0 subject model. Subscriptions
+2.0 introduces explicit `(tenant_uuid, subject_type, subject_uuid)` subject
+identities (enabling workspace-scoped memberships), immutable `plan_uuid` references,
+and provider-event receipt management. 1.4.0 is additive with no behavior changes.
+
+**Upgrade sequence (maintenance window):**
+
+1. Install and run the final 1.x release (1.4.0 or earlier):
+   ```bash
+   composer require "glueful/subscriptions:^1.4"
+   php glueful migrate:run
+   ```
+
+2. Run the preparation command once (creates the required marker):
+   ```bash
+   php glueful subscriptions:prepare-v2
+   ```
+   This idempotent command imports configuration plans into the database and
+   synthesizes archived empty-entitlement plans for any dangling subscription keys
+   that exist in production. The command fails safely if any subscription cannot be
+   resolved; no changes are written and can be re-run after fixing the underlying
+   data.
+
+3. Install 2.0 and migrate:
+   ```bash
+   composer require "glueful/subscriptions:^2.0"
+   php glueful migrate:run
+   ```
+
+The preparation marker protects 2.0 migration `006` from running without first
+validating that all subscriptions can be resolved. No subscriptions are modified
+by 1.4.0; all existing behavior is preserved until 2.0 migration completes.

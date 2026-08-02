@@ -4,6 +4,23 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## Unreleased
 
+## 1.4.0 -- 2026-08-02
+
+### Added
+
+- Preparation-state migration (`005_CreateV2PreparationState.php`): creates the
+  `subscription_v2_preparation` table to track upgrade bridge execution.
+- `subscriptions:prepare-v2` console command: idempotent upgrade bridge that runs
+  on the final 1.x installation before migrating to 2.0. Imports configuration
+  plans into the database, synthesizes archived empty-entitlement plans for any
+  dangling subscription keys, and writes a preparation marker (required by 2.0
+  migration `006`). Details in the [Upgrading to 2.0](#upgrading-to-20) section.
+
+### Changed
+
+- None. Release 1.4.0 is additive with no behavior changes to existing 1.x APIs
+  or lifecycle.
+
 ## 1.3.1 -- 2026-06-16
 
 ### Fixed
