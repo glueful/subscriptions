@@ -247,6 +247,27 @@ final class MigrationsTest extends SubscriptionsTestCase
         return false;
     }
 
+    public function testV2PreparationTableShape(): void
+    {
+        $schema = $this->connection()->getSchemaBuilder();
+        self::assertTrue($schema->hasTable('subscription_v2_preparation'));
+        foreach (['marker_key', 'catalog_signature', 'report', 'prepared_at'] as $column) {
+            self::assertTrue(
+                $schema->hasColumn('subscription_v2_preparation', $column),
+                "missing column {$column}"
+            );
+        }
+
+        // marker_key is UNIQUE: second insert with the same key must throw.
+        $this->connection()->table('subscription_v2_preparation')->insert([
+            'marker_key' => 'subject-model-v2', 'catalog_signature' => 'a',
+        ]);
+        $this->expectException(\Throwable::class);
+        $this->connection()->table('subscription_v2_preparation')->insert([
+            'marker_key' => 'subject-model-v2', 'catalog_signature' => 'b',
+        ]);
+    }
+
     /** @param array<string,mixed> $overrides */
     private function seedSubscriptionPlan(array $overrides = []): void
     {

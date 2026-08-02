@@ -10,6 +10,7 @@ use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionEvent
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionOverridesTable;
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionPlansTable;
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionsTable;
+use Glueful\Extensions\Subscriptions\Database\Migrations\CreateV2PreparationState;
 use Glueful\Helpers\Utils;
 use PHPUnit\Framework\TestCase;
 use Psr\Container\ContainerInterface;
@@ -37,6 +38,7 @@ abstract class SubscriptionsTestCase extends TestCase
         (new CreateSubscriptionOverridesTable())->up($schema);
         (new CreateSubscriptionEventsTable())->up($schema);
         (new CreateSubscriptionPlansTable())->up($schema);
+        (new CreateV2PreparationState())->up($schema);
 
         $connection = $this->connection;
         $bindings = &$this->bindings;
