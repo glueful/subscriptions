@@ -29,18 +29,22 @@ use PHPUnit\Framework\TestCase;
  * empirically by probing the real framework classes directly. The 'tags' key
  * on the strict adapter's own DSL entry (read by `applyDslTags()`) is what
  * actually wires the tag today; `tags()`/`tagsForMode()` are kept per the
- * accepted design so the wiring stays correct for free if this provider ever
- * migrates to `defs()`. This test would fail without that 'tags' key even
- * though every `tagsForMode()`/`serviceDefinitionsForMode()` unit assertion
- * passes -- it is the thing that actually closes the loop.
+ * accepted design (note: keeping them does NOT by itself make a future
+ * `defs()` migration safe -- `loadExtensionDefinitions()` prefers `defs()`
+ * over `services()` whenever both exist, so the DSL branch, definition and
+ * `'tags'` key together, would simply stop running; see `tags()`'s docblock).
+ * This test would fail without that 'tags' key even though every
+ * `tagsForMode()`/`serviceDefinitionsForMode()` unit assertion passes -- it is
+ * the thing that actually closes the loop.
  */
 final class StrictLaneTagWiringTest extends TestCase
 {
     protected function tearDown(): void
     {
-        // Restore the fixture's default so it can't leak its forced mode into
+        // Restore the fixture's defaults so it can't leak its forced mode into
         // any other test that happens to load this class in the same process.
         ForcedStrictLaneModeProvider::$mode = StrictLaneRegistration::STRICT;
+        ForcedStrictLaneModeProvider::$payviaRuntimePresent = true;
         parent::tearDown();
     }
 
@@ -91,6 +95,9 @@ final class StrictLaneTagWiringTest extends TestCase
     public function testBusModePublishesNoContainerTag(): void
     {
         ForcedStrictLaneModeProvider::$mode = StrictLaneRegistration::BUS;
+        // Bus mode means payvia IS installed, just predating the strict
+        // contract (<=2.3) -- true genuinely models that shape.
+        ForcedStrictLaneModeProvider::$payviaRuntimePresent = true;
         $ctx = $this->contextWithProvider(ForcedStrictLaneModeProvider::class);
 
         $container = ContainerFactory::create($ctx, false);
@@ -104,6 +111,8 @@ final class StrictLaneTagWiringTest extends TestCase
     public function testNoneModePublishesNoContainerTag(): void
     {
         ForcedStrictLaneModeProvider::$mode = StrictLaneRegistration::NONE;
+        // None mode means payvia is genuinely absent -- false models that.
+        ForcedStrictLaneModeProvider::$payviaRuntimePresent = false;
         $ctx = $this->contextWithProvider(ForcedStrictLaneModeProvider::class);
 
         $container = ContainerFactory::create($ctx, false);

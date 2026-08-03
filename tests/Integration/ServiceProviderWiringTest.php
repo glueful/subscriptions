@@ -18,6 +18,7 @@ use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Bridge\StrictLaneRegistration;
 use Glueful\Extensions\Subscriptions\Bridge\StrictPayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
+use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\DefaultEntitlementChecker;
 use Glueful\Extensions\Subscriptions\Http\PlanController;
@@ -546,17 +547,23 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
      * directly with each explicit mode since payvia ^2.4 being a permanent
      * require-dev fixture (Task 5) makes `interface_exists()` always true
      * in-process, so the real `services()` entry point can never itself
-     * exercise the bus/none branches.
+     * exercise the bus/none branches. `$payviaRuntimePresent` is passed
+     * explicitly throughout (fix round, review finding #2): the method is
+     * now PURE and no longer probes `class_exists()` itself.
      */
     public function testServiceDefinitionsForModeIncludesTheStrictAdapterOnlyInStrictMode(): void
     {
-        $strict = SubscriptionsServiceProvider::serviceDefinitionsForMode(StrictLaneRegistration::STRICT);
+        $strict = SubscriptionsServiceProvider::serviceDefinitionsForMode(StrictLaneRegistration::STRICT, true);
         self::assertIsArray($strict[StrictPayviaSubscriptionEventBridge::class] ?? null);
         self::assertTrue($strict[StrictPayviaSubscriptionEventBridge::class]['shared']);
         self::assertTrue($strict[StrictPayviaSubscriptionEventBridge::class]['autowire']);
+        self::assertSame(
+            [StrictPaymentEventListener::CONTAINER_TAG],
+            $strict[StrictPayviaSubscriptionEventBridge::class]['tags']
+        );
 
         foreach ([StrictLaneRegistration::BUS, StrictLaneRegistration::NONE] as $mode) {
-            $defs = SubscriptionsServiceProvider::serviceDefinitionsForMode($mode);
+            $defs = SubscriptionsServiceProvider::serviceDefinitionsForMode($mode, true);
             self::assertArrayNotHasKey(
                 StrictPayviaSubscriptionEventBridge::class,
                 $defs,
@@ -565,6 +572,34 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
             // The ordinary bus adapter stays registered regardless of mode -- the
             // lazy '@serviceId' listener needs it resolvable whenever it's wired.
             self::assertIsArray($defs[PayviaSubscriptionEventBridge::class] ?? null);
+        }
+    }
+
+    /**
+     * Task 7 fix round (review finding #2): serviceDefinitionsForMode() takes
+     * $payviaRuntimePresent as an explicit, independent input rather than
+     * probing class_exists(GatewaySubscriptionService) itself -- so the
+     * ProviderStatePullerInterface binding is toggleable independently of
+     * $mode. This is also what makes `bus` genuinely != `none`: bus models
+     * payvia present (just pre-strict-contract), none models payvia
+     * genuinely absent.
+     */
+    public function testServiceDefinitionsForModeBindsProviderStatePullerOnlyWhenPayviaRuntimePresentIsTrue(): void
+    {
+        foreach ([StrictLaneRegistration::STRICT, StrictLaneRegistration::BUS, StrictLaneRegistration::NONE] as $mode) {
+            $withPayvia = SubscriptionsServiceProvider::serviceDefinitionsForMode($mode, true);
+            self::assertArrayHasKey(
+                ProviderStatePullerInterface::class,
+                $withPayvia,
+                "mode '{$mode}' with payvia present must bind ProviderStatePullerInterface"
+            );
+
+            $withoutPayvia = SubscriptionsServiceProvider::serviceDefinitionsForMode($mode, false);
+            self::assertArrayNotHasKey(
+                ProviderStatePullerInterface::class,
+                $withoutPayvia,
+                "mode '{$mode}' with payvia absent must NOT bind ProviderStatePullerInterface"
+            );
         }
     }
 
@@ -633,18 +668,92 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
      * this repo's real environment (payvia ^2.4 present => strict mode), boot()
      * must register NO `PaymentProviderEvent` listener on the ordinary bus --
      * the strict lane is wired exclusively through services()/tags(), never
-     * through addListener(). ListenerProvider::getListenersForType() lets us
-     * assert this without dispatching anything.
+     * through addListener() -- PROVIDED the container actually carries the
+     * strict tag (a correctly built/compiled container). The tag is bound
+     * here to represent that "healthy" case; the skew case below
+     * (tag absent) is the fix-round regression this pairs with.
+     * ListenerProvider::getListenersForType() lets us assert this without
+     * dispatching anything.
      */
-    public function testBootInRealStrictEnvironmentRegistersNoOrdinaryBusListener(): void
+    public function testBootInRealStrictEnvironmentRegistersNoOrdinaryBusListenerWhenTheStrictTagIsPresent(): void
     {
         $listenerProvider = new ListenerProvider();
-        $eventService = new EventService(new EventDispatcher($listenerProvider), $listenerProvider);
+        // The container arg is required: EventService::addListener('@id') throws
+        // LogicException without one -- it's only used lazily at DISPATCH time
+        // (never exercised here), so the harness's throw-on-unknown-id container
+        // is a fine (if inert) third argument.
+        $eventService = new EventService(
+            new EventDispatcher($listenerProvider),
+            $listenerProvider,
+            $this->appContext()->getContainer()
+        );
         $this->bind(EventService::class, $eventService);
+        // Represents a correctly built container: the strict tag IS bound
+        // (its actual contents don't matter for the has() check boot() makes).
+        $this->bind(StrictPaymentEventListener::CONTAINER_TAG, []);
 
         $provider = new SubscriptionsServiceProvider($this->appContext()->getContainer());
-        $provider->boot($this->appContext());
+
+        $logFile = tempnam(sys_get_temp_dir(), 'subscriptions-error-log-');
+        $previousErrorLog = ini_set('error_log', $logFile);
+        try {
+            $provider->boot($this->appContext());
+        } finally {
+            ini_set('error_log', $previousErrorLog === false ? '' : $previousErrorLog);
+        }
+        $logged = (string) file_get_contents($logFile);
+        unlink($logFile);
 
         self::assertSame([], $listenerProvider->getListenersForType(PaymentProviderEvent::class));
+        self::assertStringNotContainsString('CRITICAL', $logged);
+    }
+
+    /**
+     * Task 7 fix round (review finding #1 -- compile-time/boot-time mode
+     * skew): reproduces upgrading payvia 2.3 -> 2.4 with a STALE compiled
+     * container. In this repo's real environment strictLaneMode() always
+     * resolves STRICT (payvia ^2.4 is a permanent require-dev fixture), but
+     * this harness's container never binds
+     * StrictPaymentEventListener::CONTAINER_TAG -- exactly modeling a
+     * compiled container built before that tag existed. Unguarded, this
+     * combination would register NEITHER lane (silently dead projection);
+     * boot() must instead log a loud, named error AND fall back to
+     * registering the degraded bus listener so delivery isn't silently zero.
+     */
+    public function testBootFallsBackToTheBusListenerAndLogsLoudlyWhenTheStrictTagIsMissingFromTheContainer(): void
+    {
+        $listenerProvider = new ListenerProvider();
+        // The container arg is required: EventService::addListener('@id') throws
+        // LogicException without one -- it's only used lazily at DISPATCH time
+        // (never exercised here), so the harness's throw-on-unknown-id container
+        // is a fine (if inert) third argument.
+        $eventService = new EventService(
+            new EventDispatcher($listenerProvider),
+            $listenerProvider,
+            $this->appContext()->getContainer()
+        );
+        $this->bind(EventService::class, $eventService);
+        // Deliberately NOT binding StrictPaymentEventListener::CONTAINER_TAG --
+        // the harness's has() therefore returns false for it, exactly like a
+        // stale compiled container that predates the strict tag.
+
+        $provider = new SubscriptionsServiceProvider($this->appContext()->getContainer());
+
+        $logFile = tempnam(sys_get_temp_dir(), 'subscriptions-error-log-');
+        $previousErrorLog = ini_set('error_log', $logFile);
+        try {
+            $provider->boot($this->appContext());
+        } finally {
+            ini_set('error_log', $previousErrorLog === false ? '' : $previousErrorLog);
+        }
+        $logged = (string) file_get_contents($logFile);
+        unlink($logFile);
+
+        self::assertStringContainsString('CRITICAL', $logged);
+        self::assertStringContainsString('stale compiled container', $logged);
+        self::assertStringContainsString(StrictPaymentEventListener::CONTAINER_TAG, $logged);
+
+        $listeners = $listenerProvider->getListenersForType(PaymentProviderEvent::class);
+        self::assertCount(1, $listeners, 'the degraded bus fallback listener must be registered');
     }
 }

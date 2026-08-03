@@ -61,18 +61,29 @@ final class StrictLaneCompiledContainerGateTest extends TestCase
         StrictPaymentEventListener::class,
     ];
 
-    /** @return iterable<string, array{string}> */
+    /**
+     * `$payviaRuntimePresent` genuinely models each mode's real-world shape
+     * (fix round, review finding #2): bus mode means payvia IS installed, just
+     * predating the strict contract (<=2.3), so `true`; none mode means payvia
+     * is genuinely absent, so `false`. Since `serviceDefinitionsForMode()` is
+     * now pure (no live probing of its own), passing these explicitly is what
+     * makes them reachable at all -- in this repo's real environment payvia is
+     * always present, so `services()` alone could never produce the `false` row.
+     *
+     * @return iterable<string, array{string, bool}>
+     */
     public static function nonStrictModes(): iterable
     {
-        yield 'bus' => [StrictLaneRegistration::BUS];
-        yield 'none' => [StrictLaneRegistration::NONE];
+        yield 'bus' => [StrictLaneRegistration::BUS, true];
+        yield 'none' => [StrictLaneRegistration::NONE, false];
     }
 
     #[DataProvider('nonStrictModes')]
     public function testCompilerAndContainerNeverReflectTheStrictAdapterOrItsContractForNonStrictModes(
-        string $mode
+        string $mode,
+        bool $payviaRuntimePresent
     ): void {
-        $dsl = SubscriptionsServiceProvider::serviceDefinitionsForMode($mode);
+        $dsl = SubscriptionsServiceProvider::serviceDefinitionsForMode($mode, $payviaRuntimePresent);
         $definitions = (new DefaultServicesLoader())->load($dsl, SubscriptionsServiceProvider::class, prod: true);
 
         // Sanity: the map genuinely doesn't reference the strict adapter's id --

@@ -16,15 +16,20 @@ use Glueful\Extensions\Subscriptions\SubscriptionsServiceProvider;
  * require-dev fixture -- see the Task-5 ledger note). This lets
  * `StrictLaneTagWiringTest` drive the REAL `ContainerFactory`/DSL-tag
  * pipeline for the bus/none branches too, without any runtime class fakery:
- * set {@see self::$mode} before building the container.
+ * set {@see self::$mode} (and, since the fix round, {@see self::$payviaRuntimePresent}
+ * -- `serviceDefinitionsForMode()` is now pure and takes it as an explicit
+ * parameter instead of probing `class_exists()` itself) before building the
+ * container.
  */
 final class ForcedStrictLaneModeProvider
 {
     public static string $mode = StrictLaneRegistration::STRICT;
 
+    public static bool $payviaRuntimePresent = true;
+
     /** @return array<string, mixed> */
     public static function services(): array
     {
-        return SubscriptionsServiceProvider::serviceDefinitionsForMode(self::$mode);
+        return SubscriptionsServiceProvider::serviceDefinitionsForMode(self::$mode, self::$payviaRuntimePresent);
     }
 }

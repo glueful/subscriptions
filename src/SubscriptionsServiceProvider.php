@@ -68,7 +68,10 @@ final class SubscriptionsServiceProvider extends ServiceProvider
      */
     public static function services(): array
     {
-        return self::serviceDefinitionsForMode(self::strictLaneMode());
+        return self::serviceDefinitionsForMode(
+            self::strictLaneMode(),
+            class_exists(\Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class)
+        );
     }
 
     /**
@@ -102,17 +105,21 @@ final class SubscriptionsServiceProvider extends ServiceProvider
     }
 
     /**
-     * Pure, mode-parameterized service definition builder (Task 7): every
-     * definition below is unconditional except the strict-adapter entry at the
-     * bottom, which is present ONLY in {@see StrictLaneRegistration::STRICT}
-     * mode. Consumed by {@see services()} with the real runtime mode, and
-     * directly by tests with an explicit mode to prove the strict adapter's
-     * definition is ABSENT from the bus/none maps without needing to fake
-     * `interface_exists`/`class_exists` at runtime.
+     * PURE service definition builder (Task 7, fix round): takes both capability
+     * inputs as explicit parameters -- `$mode` and `$payviaRuntimePresent` -- and
+     * performs NO `interface_exists`/`class_exists` probing of its own. Every
+     * definition below is unconditional except: the `ProviderStatePullerInterface`
+     * binding, present only when `$payviaRuntimePresent`; and the strict-adapter
+     * entry at the bottom, present only in {@see StrictLaneRegistration::STRICT}
+     * mode. {@see services()} is the ONLY caller that supplies the live probes;
+     * every other caller (tests, the compiled-container gate) passes both
+     * explicitly, so all combinations -- including `bus` with payvia present and
+     * `none` with payvia genuinely absent -- are reachable without runtime class
+     * fakery.
      *
      * @return array<string, mixed>
      */
-    public static function serviceDefinitionsForMode(string $mode): array
+    public static function serviceDefinitionsForMode(string $mode, bool $payviaRuntimePresent): array
     {
         $defs = [
             \Glueful\Entitlements\Contracts\EntitlementCheckerInterface::class => [
@@ -270,7 +277,9 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         // is installed. Absent payvia, ProviderStatePullerInterface stays unbound
         // and SubscriptionService resolves a null puller (reconcile no-ops). A
         // third-party provider binds this interface to its own puller instead.
-        if (class_exists(\Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class)) {
+        // (Fix round: this used to probe class_exists() live, right here, which
+        // made this method impure. services() now supplies the live probe.)
+        if ($payviaRuntimePresent) {
             $defs[ProviderStatePullerInterface::class] = [
                 'class' => PayviaProviderStatePuller::class,
                 'shared' => true,
@@ -293,9 +302,14 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         // exclusively via applyDslTags() reading each definition's own 'tags' key.
         // Verified empirically against the real framework: without this key the
         // adapter is registered as a plain, untagged service and payvia's
-        // composeStrictLane() never sees it. tags()/tagsForMode() are kept (per
-        // the accepted design) so the adapter stays correctly wired if this
-        // provider ever migrates to defs(); see their docblocks.
+        // composeStrictLane() never sees it. tags()/tagsForMode() are kept per
+        // the accepted design, but they do NOT make this provider migration-safe
+        // by themselves: loadExtensionDefinitions() picks defs() over services()
+        // whenever a provider exposes BOTH ("defs() wins; skip DSL" -- the DSL
+        // branch, including this whole definition and its 'tags' key, would
+        // never run at all). A real migration to defs() must re-port this
+        // definition (and its tag) into typed Definition objects there too; see
+        // tags()'s docblock.
         if ($mode === StrictLaneRegistration::STRICT) {
             $defs[StrictPayviaSubscriptionEventBridge::class] = [
                 'class' => StrictPayviaSubscriptionEventBridge::class,
@@ -322,9 +336,15 @@ final class SubscriptionsServiceProvider extends ServiceProvider
      * `services()`-based (DSL), so this method is NOT presently reachable
      * from real container construction -- the strict adapter's `'tags'` key
      * on its own definition (see {@see serviceDefinitionsForMode()}), read by
-     * `applyDslTags()`, is what actually wires the tag today. `tags()` is
-     * kept per the accepted design doc and so the wiring stays correct for
-     * free if this provider ever migrates to `defs()`.
+     * `applyDslTags()`, is what actually wires the tag today. `tags()` is kept
+     * per the accepted design doc, but keeping it does NOT by itself make a
+     * future migration to `defs()` safe: `loadExtensionDefinitions()` prefers
+     * `defs()` over `services()` whenever a provider exposes both ("defs() wins;
+     * skip DSL"), so the DSL branch -- the strict adapter's definition AND its
+     * `'tags'` key together -- would simply stop running, not just its tag. A
+     * real migration must re-port the definition itself into typed Definition
+     * objects in `defs()` too; `tags()` only tags an id that `defs()` would then
+     * need to already define.
      *
      * @return array<string, array<int, string>>
      */
@@ -520,8 +540,46 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         // retryable-unmapped guarantee requires >=2.4 -- via the existing lazy
         // '@serviceId' listener so the projection pipeline is constructed on
         // first dispatch, not at boot.
+        //
+        // Compile-time/boot-time mode SKEW guard (fix round): the mode is
+        // computed from live probes in TWO places -- services() (frozen into a
+        // compiled container at build time) and here in boot() (re-probed on
+        // every request). Upgrading payvia 2.3 -> 2.4 without recompiling the
+        // container reproduces this exactly: the compiled container was built
+        // while payvia was still <=2.3 (or absent), so it carries no
+        // StrictPaymentEventListener::CONTAINER_TAG entry, but boot() now sees
+        // payvia >=2.4 live and computes strict -- which, left unguarded,
+        // registers NEITHER lane (strict adds nothing new at boot; the bus
+        // branch below is skipped because mode isn't 'bus') and subscription
+        // projection goes silently dead. Degraded bus delivery beats zero
+        // delivery, so strict mode falls back to the bus listener whenever the
+        // tag isn't actually bound in the live container, and logs loudly --
+        // the real fix is recompiling/invalidating the stale container, not
+        // silently tolerating the fallback forever.
         try {
-            if (self::shouldRegisterEventBusFallback(self::strictLaneMode())) {
+            $mode = self::strictLaneMode();
+            if ($mode === StrictLaneRegistration::STRICT) {
+                $strictTagBound = $context->hasContainer()
+                    && container($context)->has(
+                        \Glueful\Extensions\Payvia\Contracts\StrictPaymentEventListener::CONTAINER_TAG
+                    );
+
+                if (!$strictTagBound) {
+                    error_log(
+                        '[Subscriptions] CRITICAL: strict payment-event lane mode but the container has '
+                        . 'no ' . \Glueful\Extensions\Payvia\Contracts\StrictPaymentEventListener::CONTAINER_TAG
+                        . ' tag bound -- this looks like a stale compiled container built before payvia '
+                        . 'was upgraded to >=2.4 (or before payvia was installed at all). Falling back to '
+                        . 'the degraded bus listener so subscription projection is not silently dead; '
+                        . 'recompile/invalidate the compiled container (e.g. di:container:compile --force) '
+                        . 'to restore the strict lane.'
+                    );
+                    app($context, \Glueful\Events\EventService::class)->addListener(
+                        \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,
+                        '@' . PayviaSubscriptionEventBridge::class
+                    );
+                }
+            } elseif (self::shouldRegisterEventBusFallback($mode)) {
                 app($context, \Glueful\Events\EventService::class)->addListener(
                     \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,
                     '@' . PayviaSubscriptionEventBridge::class
