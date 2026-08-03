@@ -21,8 +21,9 @@ final class PayviaProviderStatePuller implements ProviderStatePullerInterface
     public function pull(string $gateway, string $providerSubscriptionId): ?array
     {
         try {
-            // Payvia is a soft dependency: the class is absent in a plain checkout.
-            /** @phpstan-ignore class.notFound */
+            // Payvia is a soft runtime dependency (require-dev only, per suggest):
+            // absent in a plain checkout, but resolvable here since Task 5 added it
+            // as a dev fixture, so phpstan can now see the class too.
             $service = app($this->context, \Glueful\Extensions\Payvia\Services\GatewaySubscriptionService::class);
 
             $state = $service->reconcile($gateway, $providerSubscriptionId);

@@ -473,17 +473,20 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         );
     }
 
-    public function testBootWithPayviaAbsentRegistersNoListenerAndDoesNotThrow(): void
+    public function testBootWithPayviaPresentDegradesGracefullyWhenEventServiceIsUnbound(): void
     {
-        // Precondition of this suite: payvia is NOT installed.
-        self::assertFalse(class_exists(\Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class));
+        // Since Task 5 (strict payvia lane), glueful/payvia is a real require-dev
+        // fixture, so this class IS autoloadable here -- the listener-registration
+        // branch in boot() below is now actually exercised, not dead code.
+        self::assertTrue(class_exists(\Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class));
 
         $container = $this->appContext()->getContainer();
         self::assertNotNull($container);
 
-        // The harness container THROWS on any unknown id (EventService included),
-        // so a clean boot proves the listener registration path was never entered;
-        // registerMeta degrades via its own try/catch.
+        // The harness container still THROWS on any unknown id (EventService
+        // included); boot()'s own try/catch must swallow that and keep going --
+        // bootEnv() defaults to 'production' with no APP_ENV set, so it never
+        // rethrows. registerMeta degrades via its own try/catch the same way.
         $provider = new SubscriptionsServiceProvider($container);
         $provider->boot($this->appContext());
 

@@ -26,6 +26,18 @@ final class PayviaSubscriptionEventBridge
             return;
         }
 
+        $this->projectInner($inner);
+    }
+
+    /**
+     * The one executable mapping authority shared by both the ordinary bus
+     * `__invoke()` path (after unwrapping `->event`) and
+     * `StrictPayviaSubscriptionEventBridge::handle()` (given payvia's
+     * `PaymentProviderEventInterface` directly) -- so the two lanes cannot drift
+     * apart into two copied DTO constructors held together only by a parity test.
+     */
+    public function projectInner(object $inner): void
+    {
         $this->projector->project(new ProviderSubscriptionEvent(
             gateway: (string) $inner->gateway(),
             type: (string) $inner->type(),
