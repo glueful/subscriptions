@@ -159,12 +159,20 @@ Full details in [Upgrading to 2.0](README.md#upgrading-to-20).
 - **Strict payment event lane (payvia 2.4+).** Payvia 2.4.0+ ships a
   `StrictPayviaSubscriptionEventBridge` that implements the strict payment
   event lane with ownership-aware event filtering (closed six-type set +
-  non-empty `gateway_subscription_id` + local-mapping-or-glueful_consumer-marker
-  proof) and at-most-once delivery semantics. Lane registration supports three
-  modes (strict|bus|none) with a boot-time skew guard that checks for a
-  compiled-container tag; when the tag is missing in strict mode, the framework
-  logs a CRITICAL diagnostic and degrades to fault-isolated bus delivery
-  (cache invalidation via `di:container:compile --force`). Payvia ≤2.3 degrades
+  non-empty `gateway_subscription_id`, plus a
+  local-mapping-or-`glueful_consumer`-marker ownership proof for every type
+  EXCEPT `subscription.created`, which is routed on shape alone so the legacy
+  tenant-metadata relink flow still recovers) and **at-least-once** delivery
+  semantics: payvia redelivers whenever a strict listener throws, so the bridge
+  and everything downstream of it MUST be idempotent — the projector's
+  claim-first receipt gate is what discharges that obligation. Lane
+  registration supports three modes (strict|bus|none) with a boot-time skew
+  guard that checks for a compiled-container tag; when the tag is missing in
+  strict mode, the framework logs a CRITICAL diagnostic and degrades to
+  fault-isolated bus delivery (cache invalidation via
+  `di:container:compile --force`). **Under that bus/fallback delivery the
+  retryable-unmapped signal is swallowed by fault-isolated dispatch, so unmapped
+  events are PERMANENTLY LOST rather than retried later.** Payvia ≤2.3 degrades
   to bus delivery when installed alongside subscriptions 2.0+; the strict
   guarantee requires payvia ≥2.4.
 - **Subject model.** A `Subject` value object

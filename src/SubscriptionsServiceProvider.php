@@ -555,7 +555,10 @@ final class SubscriptionsServiceProvider extends ServiceProvider
         // delivery, so strict mode falls back to the bus listener whenever the
         // tag isn't actually bound in the live container, and logs loudly --
         // the real fix is recompiling/invalidating the stale container, not
-        // silently tolerating the fallback forever.
+        // silently tolerating the fallback forever. The fallback is LOSSY, and
+        // the log says so plainly: fault-isolated bus dispatch catches and logs
+        // listener exceptions, which swallows the projector's retryable-unmapped
+        // signal -- unmapped events are PERMANENTLY LOST, not retried later.
         try {
             $mode = self::strictLaneMode();
             if ($mode === StrictLaneRegistration::STRICT) {
@@ -570,9 +573,11 @@ final class SubscriptionsServiceProvider extends ServiceProvider
                         . 'no ' . \Glueful\Extensions\Payvia\Contracts\StrictPaymentEventListener::CONTAINER_TAG
                         . ' tag bound -- this looks like a stale compiled container built before payvia '
                         . 'was upgraded to >=2.4 (or before payvia was installed at all). Falling back to '
-                        . 'the degraded bus listener so subscription projection is not silently dead; '
-                        . 'recompile/invalidate the compiled container (e.g. di:container:compile --force) '
-                        . 'to restore the strict lane.'
+                        . 'the degraded bus listener so subscription projection is not silently dead. '
+                        . 'DATA LOSS: under bus/fallback delivery the retryable-unmapped signal is '
+                        . 'swallowed by fault-isolated dispatch, so unmapped events are PERMANENTLY LOST, '
+                        . 'not retried later. Recompile/invalidate the compiled container '
+                        . '(e.g. di:container:compile --force) to restore the strict lane.'
                     );
                     app($context, \Glueful\Events\EventService::class)->addListener(
                         \Glueful\Extensions\Payvia\Events\PaymentProviderEvent::class,

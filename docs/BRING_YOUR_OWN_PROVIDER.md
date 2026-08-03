@@ -447,13 +447,23 @@ succeed later.
 **Payvia's strict lane and equivalent guarantees:**
 
 Payvia 2.4.0+ ships a `StrictPayviaSubscriptionEventBridge` that implements the
-strict payment event lane, delivering ownership-scoped events at-most-once through
-a compiled-container tag check with degradation to fault-isolated bus delivery when
-the tag is stale. If you are building a custom provider (BYOP), you must provide
-an equivalent guarantee: ensure that outcomes 1–4 commit (so they are never
-retried) and outcome 5 (unmapped) rolls back the entire receipt claim, leaving it
-free for retry. A bridge that logs an unmapped event but returns 2xx silently
-discards it — the projector contract depends on that distinction for correctness.
+strict payment event lane, delivering ownership-scoped events **at-least-once**
+through a compiled-container tag check: payvia releases the delivery lease and
+redelivers whenever a strict listener throws, so the bridge — and any listener
+you write against the same contract — **MUST be idempotent**; the projector's
+claim-first receipt gate is what discharges that obligation here. If you are
+building a custom provider (BYOP), you must provide an equivalent guarantee:
+ensure that outcomes 1–4 commit (so they are never retried) and outcome 5
+(unmapped) rolls back the entire receipt claim, leaving it free for retry. A
+bridge that logs an unmapped event but returns 2xx silently discards it — the
+projector contract depends on that distinction for correctness.
+
+**Degraded mode is lossy.** When the strict lane is unavailable (payvia ≤2.3, a
+stale compiled container, or `bus` mode) delivery falls back to the framework's
+fault-isolated event bus, which catches and logs listener exceptions instead of
+propagating them: the retryable-unmapped signal is swallowed there, so **unmapped
+events are PERMANENTLY LOST, not retried later.** Restore the strict lane (and
+recompile the container) rather than treating the fallback as a steady state.
 
 See [§2's `metadata` and subject
 validation](#metadata-and-subject-validation) for exactly which check produces

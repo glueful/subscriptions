@@ -753,6 +753,14 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         self::assertStringContainsString('stale compiled container', $logged);
         self::assertStringContainsString(StrictPaymentEventListener::CONTAINER_TAG, $logged);
 
+        // Fix wave I4: the diagnostic must name the DATA LOSS the fallback
+        // causes, not merely the fact that it happened -- fault-isolated bus
+        // dispatch swallows the projector's retryable-unmapped signal, so
+        // unmapped events are permanently lost rather than retried later.
+        self::assertStringContainsString('DATA LOSS', $logged);
+        self::assertStringContainsString('PERMANENTLY LOST', $logged);
+        self::assertStringContainsString('not retried later', $logged);
+
         $listeners = $listenerProvider->getListenersForType(PaymentProviderEvent::class);
         self::assertCount(1, $listeners, 'the degraded bus fallback listener must be registered');
     }

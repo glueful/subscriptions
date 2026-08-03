@@ -11,7 +11,16 @@ use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
  * Thin first-party adapter: maps payvia's PaymentProviderEvent (a wrapper whose
  * `->event` exposes gateway()/type()/logicalEventKey()/normalized()) into the
  * generic ProviderSubscriptionEvent and hands it to the projector. Owns NO
- * projection rules. The ONLY subscriptions class permitted to name payvia.
+ * projection rules.
+ *
+ * Two classes in this namespace touch payvia, with deliberately different
+ * couplings: THIS one is payvia-NEUTRAL -- it duck-types the event shape
+ * (`->event` exposing gateway()/type()/logicalEventKey()/normalized()) and
+ * names no payvia type at all, so the ordinary bus lane keeps working with
+ * payvia absent. {@see StrictPayviaSubscriptionEventBridge} is the strict-lane
+ * adapter and is the one class that carries the TYPED payvia dependency
+ * (`StrictPaymentEventListener` / `PaymentProviderEventInterface`), which is
+ * why it is only ever constructed when payvia >=2.4 is actually installed.
  */
 final class PayviaSubscriptionEventBridge
 {
