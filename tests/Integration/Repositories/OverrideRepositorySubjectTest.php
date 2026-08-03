@@ -231,4 +231,138 @@ final class OverrideRepositorySubjectTest extends SubscriptionsTestCase
             $this->repo->activeForSubject($this->appContext(), Subject::tenant('tenantA'))
         );
     }
+
+    // ===========================================
+    // Task 2 -- listForSubject(): the detailed, admin-facing read
+    // ===========================================
+    //
+    // activeForSubject()'s value-map necessarily discards expires_at/reason/
+    // created_at/updated_at, and silently excludes expired rows -- fine for
+    // entitlement resolution, useless for an audit/administration view of
+    // everything a subject was ever granted. listForSubject() is that view:
+    // every row for the exact triple, expired included, ordered and fully
+    // projected but never exposing storage identity (id/uuid/tenant_uuid/
+    // subject_type/subject_uuid).
+
+    public function testListForSubjectReturnsBothActiveAndExpiredRowsForTheExactSubjectOrderedByEntitlement(): void
+    {
+        $subject = Subject::tenant('tenantA');
+
+        $this->insertOverride([
+            'entitlement' => 'reports.export',
+            'value' => json_encode(true, JSON_THROW_ON_ERROR),
+            'expires_at' => null,
+        ]);
+        $this->insertOverride([
+            'entitlement' => 'projects.limit',
+            'value' => json_encode(999, JSON_THROW_ON_ERROR),
+            'expires_at' => '2020-01-01 00:00:00', // expired
+            'reason' => 'trial ended',
+        ]);
+
+        // Noise: a sibling user under the same tenant, and a foreign workspace --
+        // neither should appear in tenantA's listing.
+        $this->insertOverride([
+            'subject_type' => 'user',
+            'subject_uuid' => 'user-1',
+            'entitlement' => 'projects.limit',
+            'value' => json_encode(1, JSON_THROW_ON_ERROR),
+        ]);
+        $this->insertOverride([
+            'tenant_uuid' => 'tenantB',
+            'subject_uuid' => 'tenantB',
+            'entitlement' => 'projects.limit',
+            'value' => json_encode(2, JSON_THROW_ON_ERROR),
+        ]);
+
+        $rows = $this->repo->listForSubject($this->appContext(), $subject);
+
+        self::assertCount(2, $rows);
+        self::assertSame('projects.limit', $rows[0]['entitlement']);
+        self::assertSame('reports.export', $rows[1]['entitlement']);
+    }
+
+    public function testListForSubjectDecodesScalarAndObjectJsonValues(): void
+    {
+        $subject = Subject::tenant('tenantA');
+
+        $this->insertOverride([
+            'entitlement' => 'projects.limit',
+            'value' => json_encode(999, JSON_THROW_ON_ERROR),
+        ]);
+        $this->insertOverride([
+            'entitlement' => 'features',
+            'value' => json_encode(['a' => 1, 'b' => true], JSON_THROW_ON_ERROR),
+        ]);
+        $this->insertOverride([
+            'entitlement' => 'reports.export',
+            'value' => json_encode(false, JSON_THROW_ON_ERROR),
+        ]);
+
+        $rows = $this->repo->listForSubject($this->appContext(), $subject);
+        $byEntitlement = [];
+        foreach ($rows as $row) {
+            $byEntitlement[$row['entitlement']] = $row['value'];
+        }
+
+        self::assertSame(999, $byEntitlement['projects.limit']);
+        self::assertSame(['a' => 1, 'b' => true], $byEntitlement['features']);
+        self::assertSame(false, $byEntitlement['reports.export']);
+    }
+
+    public function testListForSubjectPreservesNullableExpiresAtReasonAndTimestamps(): void
+    {
+        $subject = Subject::tenant('tenantA');
+
+        $this->insertOverride([
+            'entitlement' => 'reports.export',
+            'value' => json_encode(true, JSON_THROW_ON_ERROR),
+            'expires_at' => null,
+            'reason' => null,
+        ]);
+        $this->insertOverride([
+            'entitlement' => 'projects.limit',
+            'value' => json_encode(1, JSON_THROW_ON_ERROR),
+            'expires_at' => '2999-01-01 00:00:00',
+            'reason' => 'comped',
+        ]);
+
+        $rows = $this->repo->listForSubject($this->appContext(), $subject);
+
+        // Ordered by entitlement ASC: 'projects.limit' sorts before 'reports.export'.
+        self::assertSame('2999-01-01 00:00:00', $rows[0]['expires_at']);
+        self::assertSame('comped', $rows[0]['reason']);
+
+        self::assertNull($rows[1]['expires_at']);
+        self::assertNull($rows[1]['reason']);
+        self::assertNotNull($rows[1]['created_at']);
+        self::assertArrayHasKey('updated_at', $rows[1]);
+    }
+
+    public function testListForSubjectExposesNoStorageIdentityFields(): void
+    {
+        $this->insertOverride(['entitlement' => 'projects.limit']);
+
+        $rows = $this->repo->listForSubject($this->appContext(), Subject::tenant('tenantA'));
+
+        self::assertCount(1, $rows);
+        self::assertSame(
+            ['entitlement', 'value', 'expires_at', 'reason', 'created_at', 'updated_at'],
+            array_keys($rows[0])
+        );
+    }
+
+    public function testActiveForSubjectRemainsActiveOnlyAndByteCompatibleAfterTheSubjectQueryExtraction(): void
+    {
+        $this->insertOverride(['entitlement' => 'projects.limit', 'value' => json_encode(999, JSON_THROW_ON_ERROR)]);
+        $this->insertOverride([
+            'entitlement' => 'reports.export',
+            'value' => json_encode(true, JSON_THROW_ON_ERROR),
+            'expires_at' => '2020-01-01 00:00:00',
+        ]);
+
+        $overrides = $this->repo->activeForSubject($this->appContext(), Subject::tenant('tenantA'));
+
+        self::assertSame(['projects.limit' => 999], $overrides);
+    }
 }
