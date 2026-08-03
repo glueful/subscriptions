@@ -274,8 +274,9 @@ interface SubjectResolverInterface
   Strict existence and sentinel rejection are obligations of the host binding.
   The default **rejects every `subject_type='user'` subject** — user
   subscriptions are inert until the host binds a resolver that can vouch for
-  users. This is the capability switch: *binding the resolver is enabling
-  memberships*.
+  users. This is the capability switch: *memberships are enabled only when
+  the host resolver positively resolves AND validates user subjects; a
+  tenant-only host resolver binds without enabling them*.
 - **Write-path enforcement**: `SubscriptionService` and
   `PlanManagementService` validate the subject (and plan-audience match:
   a `user` subject may only hold an `audience='user'` plan whose
