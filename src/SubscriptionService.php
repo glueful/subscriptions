@@ -33,6 +33,9 @@ final class SubscriptionService
 {
     private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
 
+    /** Bulk-read batch bound (spec §6.1), measured POST-normalization/dedup. */
+    public const MAX_TENANT_BATCH = 100;
+
     public function __construct(
         private readonly SubscriptionRepository $subscriptions,
         private readonly SubscriptionEventRepository $events,
@@ -57,6 +60,64 @@ final class SubscriptionService
             $subject->tenantUuid,
             fn (): ?array => $this->subscriptions->findBySubject($this->context, $subject)
         );
+    }
+
+    /**
+     * Bulk trusted administrative projection (spec §6.1): unlike `currentFor()`,
+     * this does NOT call `SubjectResolverInterface::validate()` once per UUID,
+     * because that would recreate the N+1 through host existence checks. Its
+     * contract requires a normalized, deduplicated list obtained from the host's
+     * authoritative tenant directory AFTER platform authorization -- it must
+     * never be mounted directly as an HTTP batch-by-UUID endpoint. The
+     * repository call runs inside `TenantIntegration::runAsSystemOr()` so that
+     * tenancy interception cannot narrow the administrative projection down to
+     * whatever tenant happens to be ambient.
+     *
+     * Input is normalized (string-cast, trimmed, empties dropped, deduped)
+     * BEFORE the `MAX_TENANT_BATCH` bound is measured and BEFORE any query is
+     * issued -- the bound is checked against the normalized/deduplicated count,
+     * not the raw input length, so `['t-1', 't-1', ..., 't-1']` (101 copies of
+     * the same UUID) is one tenant, not a rejected batch.
+     *
+     * One query total, `WHERE subject_type='tenant' AND tenant_uuid IN (...)`,
+     * regardless of how many UUIDs are requested (up to the bound).
+     *
+     * @param list<string> $tenantUuids
+     * @return array<string,array<string,mixed>> keyed by tenant UUID; an absent
+     *         key means that tenant has no subscription (never a null value)
+     */
+    public function currentForTenants(array $tenantUuids): array
+    {
+        $normalized = [];
+        foreach ($tenantUuids as $uuid) {
+            $uuid = trim((string) $uuid);
+            if ($uuid !== '') {
+                $normalized[$uuid] = true;
+            }
+        }
+
+        if (count($normalized) > self::MAX_TENANT_BATCH) {
+            throw new \InvalidArgumentException(sprintf(
+                'At most %d tenant UUIDs may be read at once.',
+                self::MAX_TENANT_BATCH
+            ));
+        }
+
+        if ($normalized === []) {
+            return [];
+        }
+
+        $rows = TenantIntegration::runAsSystemOr(
+            $this->context,
+            fn (): array => $this->subscriptions->findTenantSubjectsAmong($this->context, array_keys($normalized)),
+        );
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(string) $row['tenant_uuid']] = $row;
+        }
+
+        return $out;
     }
 
     /**

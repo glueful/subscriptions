@@ -404,4 +404,116 @@ final class PurgerTest extends SubscriptionsTestCase
 
         $this->purger()->purgeSubject(Subject::user('tenantA', ''));
     }
+
+    // ---------------------------------------------------------------
+    // Task 2 -- countSubjectRows(): the non-mutating purge-preview seam
+    // ---------------------------------------------------------------
+    //
+    // countSubjectRows() MUST share the exact per-table predicates purgeSubject()
+    // deletes with -- extracted into private builders both call -- so a count can
+    // never drift from what a subsequent purge actually removes.
+
+    public function testCountSubjectRowsForAUserMatchesWhatPurgeSubjectSubsequentlyDeletes(): void
+    {
+        $this->seedFixture();
+        $subject = Subject::user('tenantA', 'user-1');
+
+        $counts = $this->purger()->countSubjectRows($subject);
+        $deleted = $this->purger()->purgeSubject($subject);
+
+        self::assertSame($deleted, $counts);
+    }
+
+    public function testCountSubjectRowsForATenantMatchesWhatPurgeSubjectSubsequentlyDeletes(): void
+    {
+        $this->seedFixture();
+        $subject = Subject::tenant('tenantA');
+
+        $counts = $this->purger()->countSubjectRows($subject);
+        $deleted = $this->purger()->purgeSubject($subject);
+
+        self::assertSame($deleted, $counts);
+    }
+
+    public function testCountSubjectRowsIsAllZeroAfterAPurge(): void
+    {
+        $this->seedFixture();
+        $subject = Subject::user('tenantA', 'user-1');
+
+        $this->purger()->purgeSubject($subject);
+        $counts = $this->purger()->countSubjectRows($subject);
+
+        foreach ($counts as $table => $count) {
+            self::assertSame(0, $count, "Expected zero rows counted for {$table} after purging.");
+        }
+    }
+
+    public function testCountSubjectRowsIsIdempotentAndNeverMutates(): void
+    {
+        $this->seedFixture();
+        $subject = Subject::user('tenantA', 'user-1');
+
+        $first = $this->purger()->countSubjectRows($subject);
+        $second = $this->purger()->countSubjectRows($subject);
+
+        self::assertSame($first, $second);
+        self::assertTrue($this->subscriptionExists('tenantA', 'user', 'user-1'));
+    }
+
+    public function testCountSubjectRowsForTheUserFormNeverCountsPlans(): void
+    {
+        $this->seedFixture();
+
+        $counts = $this->purger()->countSubjectRows(Subject::user('tenantA', 'user-1'));
+
+        self::assertArrayNotHasKey('subscription_plans', $counts);
+    }
+
+    public function testCountSubjectRowsForTheTenantFormCountsOnlyItsOwnMemberPlan(): void
+    {
+        $this->seedFixture();
+
+        $counts = $this->purger()->countSubjectRows(Subject::tenant('tenantA'));
+
+        self::assertArrayHasKey('subscription_plans', $counts);
+        self::assertSame(1, $counts['subscription_plans']);
+    }
+
+    public function testCountSubjectRowsNeverCountsASiblingUserOrAForeignWorkspace(): void
+    {
+        $this->seedFixture();
+
+        $userCounts = $this->purger()->countSubjectRows(Subject::user('tenantA', 'user-1'));
+        self::assertSame(1, $userCounts['subscriptions']);
+        self::assertSame(1, $userCounts['subscription_overrides']);
+        self::assertSame(1, $userCounts['subscription_events']);
+        self::assertSame(2, $userCounts['subscription_provider_event_receipts']); // resolved + candidate
+
+        $tenantCounts = $this->purger()->countSubjectRows(Subject::tenant('tenantA'));
+        self::assertSame(3, $tenantCounts['subscriptions']); // tenantA + user-1 + user-2
+
+        // tenantB is untouched by tenantA counts, and counts its own 2 rows independently.
+        self::assertSame(2, $this->purger()->countSubjectRows(Subject::tenant('tenantB'))['subscriptions']);
+    }
+
+    public function testCountSubjectRowsAppliesTheSameAssertPurgeableSubjectGuard(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->purger()->countSubjectRows(Subject::tenant(''));
+    }
+
+    public function testCountSubjectRowsRefusesAUserSubjectWithAnEmptyTenantUuid(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->purger()->countSubjectRows(Subject::user('', 'user-1'));
+    }
+
+    public function testCountSubjectRowsRefusesAUserSubjectWithAnEmptyUserUuid(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->purger()->countSubjectRows(Subject::user('tenantA', ''));
+    }
 }

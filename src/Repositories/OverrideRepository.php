@@ -31,14 +31,60 @@ final class OverrideRepository
     public function activeForSubject(ApplicationContext $context, Subject $subject): array
     {
         $now = db($context)->getDriver()->formatDateTime();
-        $rows = db($context)->table('subscription_overrides')
-            ->where('tenant_uuid', '=', $subject->tenantUuid)
-            ->where('subject_type', '=', $subject->type)
-            ->where('subject_uuid', '=', $subject->uuid)
+        $rows = $this->subjectQuery($context, $subject)
             ->whereRaw('(expires_at IS NULL OR expires_at > ?)', [$now])
             ->get();
 
         return $this->collect($rows);
+    }
+
+    /**
+     * The detailed, administrative read: EVERY row for the exact subject triple,
+     * expired rows included -- the audit view `activeForSubject()`'s value-map
+     * necessarily cannot give, since collapsing to `{entitlement: value}` throws
+     * away `expires_at`/`reason`/timestamps and silently excludes anything expired.
+     *
+     * Ordered by `entitlement ASC`. Each row is projected to exactly
+     * `{entitlement, value, expires_at, reason, created_at, updated_at}` -- `value`
+     * decoded through the same {@see decode()} helper `activeForSubject()` uses, so
+     * scalars/objects/booleans round-trip identically. No storage identity field
+     * (id/uuid/tenant_uuid/subject_type/subject_uuid) is exposed: the caller already
+     * knows the subject it asked for, and a listing meant for display/audit has no
+     * business handing back primary-key material.
+     *
+     * This method does NOT perform host authorization or tenant switching itself --
+     * it is a plain subject-scoped read, exactly like `activeForSubject()`. Callers
+     * doing cross-workspace administration (an admin inspecting a tenant/user they
+     * are not currently scoped to) MUST wrap the call in
+     * {@see \Glueful\Extensions\Subscriptions\Lifecycle\TenantIntegration::runAsTenantOr()}
+     * themselves; this repository has no opinion on tenancy.
+     *
+     * @return list<array{
+     *     entitlement:string,
+     *     value:mixed,
+     *     expires_at:?string,
+     *     reason:?string,
+     *     created_at:?string,
+     *     updated_at:?string
+     * }>
+     */
+    public function listForSubject(ApplicationContext $context, Subject $subject): array
+    {
+        $rows = $this->subjectQuery($context, $subject)
+            ->orderBy('entitlement', 'ASC')
+            ->get();
+
+        return array_map(
+            fn (array $row): array => [
+                'entitlement' => (string) ($row['entitlement'] ?? ''),
+                'value' => $this->decode($row['value'] ?? null),
+                'expires_at' => $row['expires_at'] ?? null,
+                'reason' => $row['reason'] ?? null,
+                'created_at' => $row['created_at'] ?? null,
+                'updated_at' => $row['updated_at'] ?? null,
+            ],
+            $rows
+        );
     }
 
     /**
@@ -107,18 +153,29 @@ final class OverrideRepository
     /**
      * The exact predicate of `uniq_override_subject_entitlement` -- the single
      * definition of "this subject's override for this entitlement", shared by the
-     * upsert's probe/update and the delete so they can never drift apart.
+     * upsert's probe/update and the delete so they can never drift apart. Built on
+     * top of {@see subjectQuery()}, adding only the entitlement predicate.
      */
     private function scopedQuery(
         ApplicationContext $context,
         Subject $subject,
         string $entitlement
     ): QueryBuilder {
+        return $this->subjectQuery($context, $subject)->where('entitlement', '=', $entitlement);
+    }
+
+    /**
+     * The shared triple predicate -- (tenant_uuid, subject_type, subject_uuid) --
+     * used by every subject-scoped read: `activeForSubject()`, `listForSubject()`,
+     * and (via `scopedQuery()`) the write paths' entitlement-scoped lookups. One
+     * definition means the triple match can never drift between callers.
+     */
+    private function subjectQuery(ApplicationContext $context, Subject $subject): QueryBuilder
+    {
         return db($context)->table('subscription_overrides')
             ->where('tenant_uuid', '=', $subject->tenantUuid)
             ->where('subject_type', '=', $subject->type)
-            ->where('subject_uuid', '=', $subject->uuid)
-            ->where('entitlement', '=', $entitlement);
+            ->where('subject_uuid', '=', $subject->uuid);
     }
 
     /**

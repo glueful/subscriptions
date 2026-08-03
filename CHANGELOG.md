@@ -2,6 +2,68 @@
 
 All notable changes to `glueful/subscriptions` are documented here.
 
+## 2.1.0 -- 2026-08-03
+
+Four additive host-integration seams for platform-authority callers (an
+admin console, a background job, another extension acting on the platform's
+behalf) that need to read across subjects/tenants without going through the
+tenant-scoped facade one UUID at a time. **No behavior changes for existing
+callers** -- every 1.x/2.0 API keeps its exact signature and semantics.
+
+Two contracts these seams share, worth naming once:
+
+- **Trusted-projection contract.** `SubscriptionService::currentForTenants()`
+  does not call `SubjectResolverInterface::validate()` per UUID -- that would
+  reintroduce the N+1 the batch exists to avoid. Its tenant UUIDs are
+  therefore assumed **server-derived and already authorized** by the caller's
+  own authoritative directory, never taken raw from client input, and it must
+  never be mounted directly as an HTTP batch-by-UUID endpoint. Callers are
+  platform-authority code, not arbitrary request handlers.
+- **Host-context contract.** Reads that resolve or enumerate across subjects
+  outside the ambient tenant (`OverrideRepository::listForSubject()`) perform
+  no tenancy switching themselves -- a cross-workspace caller MUST wrap the
+  call in `TenantIntegration::runAsTenantOr()` itself. Trusted administrative
+  reads that must run before or across any single tenant context
+  (`currentForTenants()`, the purger's counts, schema readiness) instead run
+  through `TenantIntegration::runAsSystemOr()` internally, so ambient tenant
+  scoping cannot narrow an administrative projection.
+
+### Added
+
+- **`SubscriptionService::currentForTenants(array $tenantUuids): array`.**
+  Trusted administrative bulk read: one query,
+  `WHERE subject_type='tenant' AND tenant_uuid IN (...)`, regardless of how
+  many UUIDs are requested, bounded by `MAX_TENANT_BATCH` (100). Input is
+  normalized (string-cast, trimmed, empties dropped, deduplicated) before the
+  bound is measured. Returns `array<string,array<string,mixed>>` keyed by
+  tenant UUID; an absent key means that tenant has no subscription, never a
+  null value. Runs through `TenantIntegration::runAsSystemOr()`. See
+  [Bulk administrative reads](README.md#bulk-administrative-reads).
+- **`OverrideRepository::listForSubject(ApplicationContext $context, Subject $subject): array`.**
+  The detailed, administrative counterpart to `activeForSubject()`: every row
+  for the subject's exact triple, expired rows included, ordered by
+  `entitlement ASC`, each projected to `{entitlement, value, expires_at,
+  reason, created_at, updated_at}` -- no storage identity field. A plain
+  subject-scoped read with no tenancy opinion of its own; cross-workspace
+  callers wrap it in `TenantIntegration::runAsTenantOr()`. See
+  [Administrative override reads](README.md#administrative-override-reads).
+- **`SubscriptionSubjectDataPurger::countSubjectRows(Subject $subject): array`.**
+  Non-mutating preview of `purgeSubject()`: a `SELECT COUNT(*)` per table
+  (`subscriptions`, `subscription_overrides`, `subscription_events`,
+  `subscription_provider_event_receipts`, and, for a tenant subject,
+  `subscription_plans`), built from the exact same per-table predicates
+  `purgeSubject()` deletes with, so a count can never drift from what a
+  subsequent purge actually removes. Same `assertPurgeableSubject` guard and
+  `runAsSystemOr` wrap as the mutating call.
+- **`SubscriptionSchemaReadiness::isReady(): bool`.** Extension-owned
+  readiness authority: probes the live database directly for the complete
+  minimum 2.x runtime shape (every table and column migration `006`
+  introduces), so a hand-rolled, partially migrated, or downgraded database
+  is caught the same as one never migrated at all. Never fatal -- any thrown
+  DB error while probing resolves to `false`, never propagates. Registered
+  shared/autowired by the service provider. See
+  [Schema readiness](README.md#schema-readiness).
+
 ## 2.0.0 -- 2026-08-02
 
 Subscriptions 2.0 generalizes the workspace-only 1.x lifecycle engine to two

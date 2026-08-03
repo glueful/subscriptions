@@ -35,6 +35,7 @@ use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
 use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolverFactory;
+use Glueful\Extensions\Subscriptions\Schema\SubscriptionSchemaReadiness;
 use Psr\Container\ContainerInterface;
 
 final class SubscriptionsServiceProvider extends ServiceProvider
@@ -254,6 +255,15 @@ final class SubscriptionsServiceProvider extends ServiceProvider
             // like every other consumer here); hosts decide when to invoke it.
             SubscriptionSubjectDataPurger::class => [
                 'class' => SubscriptionSubjectDataPurger::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            // Task 3 (2.1.0 seams, Phase A) -- the extension-owned schema
+            // readiness authority Thallo's EngineGateway calls to distinguish
+            // schema_not_ready from ready. No per-request state (ApplicationContext
+            // is autowired per resolution, same as every other consumer here).
+            SubscriptionSchemaReadiness::class => [
+                'class' => SubscriptionSchemaReadiness::class,
                 'shared' => true,
                 'autowire' => true,
             ],

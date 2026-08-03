@@ -297,6 +297,25 @@ and arrays all round-trip.
 > `subject_uuid = tenant_uuid`. For a member, `subject_type = 'user'` and
 > `subject_uuid = <user uuid>`. `value` is JSON (`'500'`, `'true'`, `'"gold"'`).
 
+### Administrative override reads
+
+`OverrideRepository::listForSubject($context, $subject)` is the detailed,
+administrative counterpart to `activeForSubject()`: it returns **every** row
+for the subject's exact triple, expired ones included, ordered by
+`entitlement ASC`, each projected to `{entitlement, value, expires_at,
+reason, created_at, updated_at}` -- no storage identity field. Use it for an
+audit/admin view where `activeForSubject()`'s collapsed `{entitlement:
+value}` map (which silently drops anything expired) isn't enough.
+
+```php
+$overrides->listForSubject($context, Subject::user($tenantUuid, $userUuid));
+```
+
+Like `activeForSubject()`, this is a plain subject-scoped read with no
+tenancy opinion of its own -- a caller doing cross-workspace administration
+(an admin inspecting a subject it is not currently scoped to) must wrap the
+call in `TenantIntegration::runAsTenantOr()` itself.
+
 ## Lifecycle via SubscriptionService
 
 ```php
@@ -322,6 +341,30 @@ Every transition appends a `subscription_events` row (`created`,
 `plan_changed`, `canceled`, `reconciled`, or provider event types) with
 `from_status` / `to_status` / `source` (`manual`, `provider_event`,
 `reconcile`).
+
+## Bulk administrative reads
+
+`SubscriptionService::currentForTenants(array $tenantUuids): array` is a
+trusted bulk projection for platform-authority callers (an admin console, a
+background report) that already have a normalized, deduplicated tenant list
+from their own authoritative directory -- one query,
+`WHERE subject_type='tenant' AND tenant_uuid IN (...)`, regardless of how
+many UUIDs are requested, up to `MAX_TENANT_BATCH` (100).
+
+```php
+$rows = $service->currentForTenants(['tenant-a', 'tenant-b']);
+// ['tenant-a' => [...subscription row...], 'tenant-b' => [...]]
+// an absent key means that tenant has no subscription -- never a null value
+```
+
+Unlike `currentFor()`, this does **not** call
+`SubjectResolverInterface::validate()` per UUID -- doing so would reintroduce
+the N+1 the batch exists to avoid. That makes it a **trusted projection**:
+the caller's tenant UUIDs are assumed to already be server-derived and
+authorized (never taken raw from client input), and it must never be mounted
+directly as an HTTP batch-by-UUID endpoint. The repository read runs through
+`TenantIntegration::runAsSystemOr()` so ambient tenant scoping cannot narrow
+the administrative projection.
 
 ## Rate-limit tier bridge
 
@@ -534,6 +577,29 @@ at the cadence you want; the package does not self-schedule.
 
 "Works" for the checker always means: catalog + overrides + status gating; no
 payment object is ever consulted at check time.
+
+## Schema readiness
+
+`SubscriptionSchemaReadiness::isReady(): bool` is the extension-owned
+authority a host uses to distinguish "migrations haven't run yet" from
+"ready" without inferring it from a migrations-ledger row. It probes the
+live database directly for the complete minimum 2.x runtime shape -- every
+table and column migration `006` introduces -- so a database that was
+hand-rolled, partially migrated, or downgraded is caught the same as one
+that was never migrated at all.
+
+```php
+use Glueful\Extensions\Subscriptions\Schema\SubscriptionSchemaReadiness;
+
+$ready = app($context, SubscriptionSchemaReadiness::class)->isReady();
+```
+
+It never throws: any DB error while probing (a lost connection, a locked
+database, an unsupported driver) resolves to `false`, never propagates --
+a false positive would let a host surface broken admin APIs against a
+partial schema, and a thrown exception would break a host's degraded-mode
+fallback, so both are avoided. Registered shared/autowired by the service
+provider.
 
 ## Testing
 

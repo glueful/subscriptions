@@ -39,6 +39,7 @@ use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EffectivePlanResolver;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
 use Glueful\Extensions\Subscriptions\Resolution\MemberEntitlementResolverFactory;
+use Glueful\Extensions\Subscriptions\Schema\SubscriptionSchemaReadiness;
 use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\SubscriptionsServiceProvider;
@@ -179,12 +180,24 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
      * Task 14: ProviderEventReceiptRepository and SubscriptionSubjectDataPurger
      * have no per-request-scoped state (unlike MemberEntitlementResolver), so
      * they are ordinary shared, autowired services.
+     *
+     * Task 3 (2.1.0 seams, Phase A): SubscriptionSchemaReadiness -- the
+     * extension-owned schema readiness authority Thallo's EngineGateway calls
+     * to distinguish schema_not_ready from ready -- holds no per-request state
+     * either (just the autowired ApplicationContext), so it is registered the
+     * same way.
      */
     public function testServicesRegisterProviderEventReceiptRepositoryAndSubjectDataPurgerAsSharedAutowired(): void
     {
         $services = SubscriptionsServiceProvider::services();
 
-        foreach ([ProviderEventReceiptRepository::class, SubscriptionSubjectDataPurger::class] as $id) {
+        foreach (
+            [
+            ProviderEventReceiptRepository::class,
+            SubscriptionSubjectDataPurger::class,
+            SubscriptionSchemaReadiness::class,
+            ] as $id
+        ) {
             self::assertIsArray($services[$id] ?? null, "Missing service definition: {$id}");
             self::assertTrue($services[$id]['shared'], "{$id} should be a shared service");
             self::assertTrue($services[$id]['autowire'] ?? false, "{$id} should be autowired");
