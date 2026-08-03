@@ -584,8 +584,9 @@ SUBSCRIPTIONS_TEST_PG_PASS="subscriptions_test" \
 vendor/bin/phpunit --filter PostgresSavepoint
 ```
 
-CI runs this against a PostgreSQL 16 service container on every build -- see
-`.github/workflows/ci.yml`.
+To guarantee the proof actually executed (rather than silently skipped), add
+`--fail-on-skipped` to the command above in any environment that provisions
+PostgreSQL.
 
 ## Upgrading to 2.0
 

@@ -225,11 +225,11 @@ Full details in [Upgrading to 2.0](README.md#upgrading-to-20).
   defaulting to the platform scope. New `subscriptions:plans:import-config`
   command performs the create-missing config import for fresh installs and
   later config-plan additions.
-- **PostgreSQL CI.** `.github/workflows/ci.yml` provisions a PostgreSQL 16
-  service and runs the full suite against it, with `--fail-on-skipped` on the
-  savepoint proof so the job fails outright if the PostgreSQL-specific
-  concurrency test (`PostgresSavepointTest`) is ever silently skipped instead
-  of actually exercising the poisoned-transaction path
+- **PostgreSQL savepoint proof.** An env-gated integration test
+  (`PostgresSavepointTest`, `SUBSCRIPTIONS_TEST_PG_*` variables — see the
+  README's testing section) exercises the poisoned-transaction path against a
+  real PostgreSQL server; it skips cleanly when no DSN is provided. Run it with
+  `--fail-on-skipped` in any environment that must guarantee it executed
   `SubscriptionService::startFor()`'s savepoint isolation exists to prevent.
 - `SubscriptionsServiceProvider::services()` registers `MemberEntitlementResolver`
   (non-shared factory -- its ctor-injected `PlanCatalog` is scoped to exactly
