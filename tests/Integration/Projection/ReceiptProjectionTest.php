@@ -200,6 +200,59 @@ final class ReceiptProjectionTest extends SubscriptionsTestCase
         self::assertSame('tenantA', $eventData['metadata']['tenant_uuid'] ?? null);
     }
 
+    /**
+     * Task 6: glueful_consumer ownership marker must survive sanitization in BOTH
+     * receipts.data AND events.data, even when the payload carries hostile nested
+     * secrets, so the strict adapter (Task 5) can verify ownership through
+     * normalized()['metadata']['glueful_consumer'] on both paths.
+     */
+    public function testGluefulConsumerOwnershipMarkerSurvivesInBothReceiptAndEventData(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'trialing',
+            'provider_gateway' => 'paystack',
+            'provider_subscription_id' => 'sub_X',
+        ]);
+
+        $this->project('subscription.past_due', 'k1', [
+            'gateway_subscription_id' => 'sub_X',
+            'status' => 'active',
+            'customer_email' => 'attacker@example.com',
+            'card' => ['token' => 'tok_secret'],
+            'metadata' => [
+                'tenant_uuid' => 'tenantA',
+                'subject_type' => 'tenant',
+                'subject_uuid' => 'tenantA',
+                'plan_uuid' => 'planv2pro001',
+                'glueful_consumer' => 'subscriptions',
+                'billing_email' => 'someone@example.com',
+                'api_key' => 'sk_live_hostile',
+            ],
+        ]);
+
+        $receipt = $this->receiptFor('paystack', 'k1');
+        self::assertIsArray($receipt);
+        self::assertSame('accepted', $receipt['outcome']);
+        $receiptData = json_decode((string) $receipt['data'], true);
+
+        $event = $this->eventRowFor('paystack', 'k1');
+        self::assertIsArray($event);
+        $eventData = json_decode((string) $event['data'], true);
+
+        // Same safe projection on both sides -- ownership marker intact on both.
+        self::assertSame($receiptData, $eventData);
+        self::assertSame('subscriptions', $receiptData['metadata']['glueful_consumer'] ?? null);
+        self::assertSame('subscriptions', $eventData['metadata']['glueful_consumer'] ?? null);
+
+        // Hostile fields stripped from both.
+        self::assertArrayNotHasKey('customer_email', $eventData);
+        self::assertArrayNotHasKey('card', $eventData);
+        self::assertArrayNotHasKey('billing_email', $eventData['metadata'] ?? []);
+        self::assertArrayNotHasKey('api_key', $eventData['metadata'] ?? []);
+    }
+
     public function testDuplicateLogicalKeyLosesTheReceiptsClaimAndNeverReprojects(): void
     {
         $this->seedSubscription([

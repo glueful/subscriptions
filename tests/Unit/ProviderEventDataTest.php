@@ -145,4 +145,58 @@ final class ProviderEventDataTest extends TestCase
 
         self::assertSame(['gateway_subscription_id' => 'sub_1'], $sanitized);
     }
+
+    /**
+     * Task 6: glueful_consumer marker must survive sanitization even when
+     * the payload carries hostile nested secrets, so the strict adapter
+     * (Task 5) can verify ownership through normalized()['metadata']['glueful_consumer'].
+     */
+    public function testRetainsGluefulConsumerOwnershipMarkerThroughSanitization(): void
+    {
+        $sanitized = ProviderEventData::sanitize([
+            'gateway_subscription_id' => 'sub_1',
+            'metadata' => [
+                'tenant_uuid' => 'tenantA',
+                'subject_type' => 'tenant',
+                'subject_uuid' => 'tenantA',
+                'plan_uuid' => 'planv2pro001',
+                'glueful_consumer' => 'subscriptions',
+                'api_key' => 'sk_live_hostile',
+                'secret' => 'should-not-survive',
+            ],
+        ]);
+
+        self::assertSame([
+            'gateway_subscription_id' => 'sub_1',
+            'metadata' => [
+                'tenant_uuid' => 'tenantA',
+                'subject_type' => 'tenant',
+                'subject_uuid' => 'tenantA',
+                'plan_uuid' => 'planv2pro001',
+                'glueful_consumer' => 'subscriptions',
+            ],
+        ], $sanitized);
+    }
+
+    public function testGluefulConsumerSurvivesWithHostileNestedSecretsInOtherMetadata(): void
+    {
+        $sanitized = ProviderEventData::sanitize([
+            'metadata' => [
+                'glueful_consumer' => 'subscriptions',
+                'tenant_uuid' => [
+                    'value' => 'tenantA',
+                    'api_key' => 'sk_live_hostile',
+                    'token' => 'secret_token',
+                ],
+                'secret' => 'top_level_secret',
+            ],
+        ]);
+
+        self::assertSame([
+            'metadata' => [
+                'tenant_uuid' => ['value' => 'tenantA'],
+                'glueful_consumer' => 'subscriptions',
+            ],
+        ], $sanitized);
+    }
 }

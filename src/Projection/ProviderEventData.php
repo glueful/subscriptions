@@ -33,7 +33,7 @@ namespace Glueful\Extensions\Subscriptions\Projection;
 final class ProviderEventData
 {
     private const TOP_LEVEL_ALLOW = ['gateway_subscription_id', 'status', 'current_period_end', 'metadata'];
-    private const METADATA_ALLOW = ['tenant_uuid', 'subject_type', 'subject_uuid', 'plan_uuid'];
+    private const METADATA_ALLOW = ['tenant_uuid', 'subject_type', 'subject_uuid', 'plan_uuid', 'glueful_consumer'];
 
     private const SECRET_KEY_PATTERN =
         '/token|secret|password|authorization|signature|api_key|client_secret/i';
