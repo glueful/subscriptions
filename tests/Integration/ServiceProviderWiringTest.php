@@ -8,8 +8,15 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Container\Autowire\AutowireDefinition;
 use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Container\Loader\DefaultServicesLoader;
+use Glueful\Events\EventDispatcher;
+use Glueful\Events\EventService;
+use Glueful\Events\ListenerProvider;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
+use Glueful\Extensions\Payvia\Contracts\StrictPaymentEventListener;
+use Glueful\Extensions\Payvia\Events\PaymentProviderEvent;
 use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
+use Glueful\Extensions\Subscriptions\Bridge\StrictLaneRegistration;
+use Glueful\Extensions\Subscriptions\Bridge\StrictPayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
 use Glueful\Extensions\Subscriptions\DefaultEntitlementChecker;
@@ -530,5 +537,114 @@ final class ServiceProviderWiringTest extends SubscriptionsTestCase
         $provider->boot($this->appContext());
 
         self::assertTrue(true); // reaching here means boot() degraded gracefully
+    }
+
+    /**
+     * Task 7 -- spec §4: the strict-adapter definition is present in
+     * serviceDefinitionsForMode()'s output ONLY in strict mode -- ABSENT
+     * (not merely present-but-unused) from the bus/none maps. Driven
+     * directly with each explicit mode since payvia ^2.4 being a permanent
+     * require-dev fixture (Task 5) makes `interface_exists()` always true
+     * in-process, so the real `services()` entry point can never itself
+     * exercise the bus/none branches.
+     */
+    public function testServiceDefinitionsForModeIncludesTheStrictAdapterOnlyInStrictMode(): void
+    {
+        $strict = SubscriptionsServiceProvider::serviceDefinitionsForMode(StrictLaneRegistration::STRICT);
+        self::assertIsArray($strict[StrictPayviaSubscriptionEventBridge::class] ?? null);
+        self::assertTrue($strict[StrictPayviaSubscriptionEventBridge::class]['shared']);
+        self::assertTrue($strict[StrictPayviaSubscriptionEventBridge::class]['autowire']);
+
+        foreach ([StrictLaneRegistration::BUS, StrictLaneRegistration::NONE] as $mode) {
+            $defs = SubscriptionsServiceProvider::serviceDefinitionsForMode($mode);
+            self::assertArrayNotHasKey(
+                StrictPayviaSubscriptionEventBridge::class,
+                $defs,
+                "mode '{$mode}' must not define the strict adapter"
+            );
+            // The ordinary bus adapter stays registered regardless of mode -- the
+            // lazy '@serviceId' listener needs it resolvable whenever it's wired.
+            self::assertIsArray($defs[PayviaSubscriptionEventBridge::class] ?? null);
+        }
+    }
+
+    /**
+     * Task 7: services() (the real, no-arg entry point the framework calls)
+     * delegates to serviceDefinitionsForMode() with the real runtime mode.
+     * Since payvia ^2.4 is a permanent require-dev fixture, that mode is
+     * always STRICT here -- this is a real, non-faked assertion about this
+     * repo's actual dev environment.
+     */
+    public function testRealServicesEntryPointIncludesTheStrictAdapterInThisDevEnvironment(): void
+    {
+        $services = SubscriptionsServiceProvider::services();
+
+        self::assertIsArray($services[StrictPayviaSubscriptionEventBridge::class] ?? null);
+    }
+
+    /**
+     * Task 7: tagsForMode() publishes the strict adapter under payvia's
+     * StrictPaymentEventListener::CONTAINER_TAG ONLY in strict mode; bus/none
+     * publish no tags at all.
+     */
+    public function testTagsForModePublishesTheStrictAdapterUnderContainerTagOnlyInStrictMode(): void
+    {
+        self::assertSame(
+            [StrictPaymentEventListener::CONTAINER_TAG => [StrictPayviaSubscriptionEventBridge::class]],
+            SubscriptionsServiceProvider::tagsForMode(StrictLaneRegistration::STRICT)
+        );
+
+        foreach ([StrictLaneRegistration::BUS, StrictLaneRegistration::NONE] as $mode) {
+            self::assertSame(
+                [],
+                SubscriptionsServiceProvider::tagsForMode($mode),
+                "mode '{$mode}' must publish no tags"
+            );
+        }
+    }
+
+    /**
+     * Task 7: tags() (the real, no-arg entry point ContainerFactory::applyProviderTags()
+     * calls) mirrors the real-environment services() assertion above -- always
+     * strict in this repo, since payvia ^2.4 is a permanent require-dev fixture.
+     */
+    public function testRealTagsEntryPointPublishesTheStrictAdapterInThisDevEnvironment(): void
+    {
+        self::assertSame(
+            [StrictPaymentEventListener::CONTAINER_TAG => [StrictPayviaSubscriptionEventBridge::class]],
+            SubscriptionsServiceProvider::tags()
+        );
+    }
+
+    /**
+     * Task 7: the pure, mode-parameterized companion to boot()'s S7 branch --
+     * the degraded bus fallback listener is wired ONLY in bus mode.
+     */
+    public function testShouldRegisterEventBusFallbackIsTrueOnlyInBusMode(): void
+    {
+        self::assertTrue(SubscriptionsServiceProvider::shouldRegisterEventBusFallback(StrictLaneRegistration::BUS));
+        self::assertFalse(SubscriptionsServiceProvider::shouldRegisterEventBusFallback(StrictLaneRegistration::STRICT));
+        self::assertFalse(SubscriptionsServiceProvider::shouldRegisterEventBusFallback(StrictLaneRegistration::NONE));
+    }
+
+    /**
+     * Task 7 -- the real boot() S7 branch, exercised end-to-end against REAL
+     * EventService/EventDispatcher/ListenerProvider instances (no fakes): in
+     * this repo's real environment (payvia ^2.4 present => strict mode), boot()
+     * must register NO `PaymentProviderEvent` listener on the ordinary bus --
+     * the strict lane is wired exclusively through services()/tags(), never
+     * through addListener(). ListenerProvider::getListenersForType() lets us
+     * assert this without dispatching anything.
+     */
+    public function testBootInRealStrictEnvironmentRegistersNoOrdinaryBusListener(): void
+    {
+        $listenerProvider = new ListenerProvider();
+        $eventService = new EventService(new EventDispatcher($listenerProvider), $listenerProvider);
+        $this->bind(EventService::class, $eventService);
+
+        $provider = new SubscriptionsServiceProvider($this->appContext()->getContainer());
+        $provider->boot($this->appContext());
+
+        self::assertSame([], $listenerProvider->getListenersForType(PaymentProviderEvent::class));
     }
 }
