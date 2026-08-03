@@ -33,12 +33,20 @@ use PHPUnit\Framework\TestCase;
  * class the FIRST time anything in the process needs it -- once loaded,
  * `new \ReflectionClass($name)` (what both `ContainerCompiler` and the
  * runtime `Container`'s autowire resolver use) never re-triggers the
- * autoloader. Other suites in this repo (e.g. StrictBridgeSupportsTest)
- * legitimately construct `StrictPayviaSubscriptionEventBridge` directly,
- * which would load both FQCNs into the SAME PHPUnit process and make the spy
- * here a false pass. `#[RunClassInSeparateProcess]` guarantees a clean
- * process where the only thing that could load either class is the code
- * under test.
+ * autoloader. The actual contaminator, concretely: `tests/Unit/ServiceProviderShapeTest.php`
+ * (pre-existing, unrelated to Task 7) calls `SubscriptionsServiceProvider::services()`,
+ * which now goes through `strictLaneMode()`'s `interface_exists(StrictPaymentEventListener::class)`
+ * probe -- `interface_exists()` defaults to `$autoload = true`, so that single line
+ * autoloads payvia's `StrictPaymentEventListener` as a side effect. That test is
+ * merely the smallest, most representative example: essentially every test in
+ * this suite that calls `services()`/`tags()`/`boot()` triggers the same probe (and
+ * tests that actually construct `StrictPayviaSubscriptionEventBridge`, e.g.
+ * `StrictBridgeSupportsTest`, load both FQCNs together via its `implements`
+ * clause) -- so without isolation, SOME test loading one or both classes before
+ * this one runs is not a remote edge case but the default outcome, and not
+ * something this test can rely on a particular file/suite ordering to avoid.
+ * `#[RunClassInSeparateProcess]` guarantees a clean process where the only thing
+ * that could load either class is the code under test.
  *
  * WHY THIS DOESN'T CALL `ContainerFactory::create()`: that entry point merges
  * in every framework-core provider (ORM, Auth, Queue, ...) and, verified by
