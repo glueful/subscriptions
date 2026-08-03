@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Repositories;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Subject;
+use Glueful\Extensions\Subscriptions\SubjectType;
 
 /**
  * Intentionally NON-final: the receipts-first projector's test suite subclasses
@@ -42,6 +43,31 @@ class SubscriptionRepository
             ->where('subject_uuid', '=', $subject->uuid)
             ->limit(1)
             ->first();
+    }
+
+    /**
+     * Bulk trusted read (spec §6.1): ONE `whereIn` query over
+     * `subject_type='tenant' AND tenant_uuid IN (...)`, rows returned exactly as
+     * `findBySubject()` returns its single row -- no per-row decode step exists on
+     * that path (JSON columns like `metadata` come back as the raw driver value),
+     * so none is introduced here either. The caller (SubscriptionService::
+     * currentForTenants()) is responsible for normalization/dedup and the
+     * empty-input short-circuit; this method only guards against issuing a
+     * `whereIn` with no values.
+     *
+     * @param list<string> $tenantUuids
+     * @return list<array<string,mixed>>
+     */
+    public function findTenantSubjectsAmong(ApplicationContext $context, array $tenantUuids): array
+    {
+        if ($tenantUuids === []) {
+            return [];
+        }
+
+        return db($context)->table('subscriptions')
+            ->where('subject_type', '=', SubjectType::TENANT)
+            ->whereIn('tenant_uuid', $tenantUuids)
+            ->get();
     }
 
     /** @return array<string,mixed>|null */
