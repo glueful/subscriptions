@@ -444,6 +444,17 @@ succeed later.
   redelivery trigger is). Catching it and still returning 2xx acknowledges the
   webhook while silently discarding the event.
 
+**Payvia's strict lane and equivalent guarantees:**
+
+Payvia 2.4.0+ ships a `StrictPayviaSubscriptionEventBridge` that implements the
+strict payment event lane, delivering ownership-scoped events at-most-once through
+a compiled-container tag check with degradation to fault-isolated bus delivery when
+the tag is stale. If you are building a custom provider (BYOP), you must provide
+an equivalent guarantee: ensure that outcomes 1–4 commit (so they are never
+retried) and outcome 5 (unmapped) rolls back the entire receipt claim, leaving it
+free for retry. A bridge that logs an unmapped event but returns 2xx silently
+discards it — the projector contract depends on that distinction for correctness.
+
 See [§2's `metadata` and subject
 validation](#metadata-and-subject-validation) for exactly which check produces
 which code.

@@ -327,6 +327,27 @@ Ownership table — who owns which provider object, per subject type:
 | Checkout/session creation | host/operator tooling (unchanged) | host storefront (Thallo Phase 3); never the extension |
 | Webhook → state | projector | projector (same pipeline) |
 
+**Delivery and retry contract (payvia ≥2.4):**
+
+The payvia provider integration (2.4.0+) ships a `StrictPayviaSubscriptionEventBridge`
+that honors the strict payment event lane design. This bridge implements the
+ownership-aware supports() gate (closed six-type set + non-empty
+`gateway_subscription_id` + local-mapping-or-glueful_consumer-marker proof) and
+registers a strict-mode lane that guarantees **at-most-once delivery semantics**
+for owner-scoped events. Payvia ≥2.4 requires subscriptions 2.0+; payvia ≤2.3
+degrades to fault-isolated bus delivery (default, non-strict lane) on version mismatch,
+logged at boot. See `docs/superpowers/specs/2026-08-02-strict-payment-event-lane-design.md`
+in the payvia repository for the full lane design and integration details.
+
+**Skew-guard and container tag degradation (strict mode):**
+
+When running in strict mode with a missing compiled-container tag, the DI container
+logs a CRITICAL diagnostic and degrades to bus delivery. Cache invalidation is
+available via `di:container:compile --force`. This is an operational safeguard;
+a stale container tag in strict mode is not a correctness issue (bus delivery is
+fault-isolated, just not at-most-once), but it flags a deploy or caching issue that
+should be diagnosed.
+
 - **Metadata contract:** every provider subscription created by a host MUST
   carry `tenant_uuid`, `subject_type`, `subject_uuid`, and `plan_uuid` in its
   metadata. The payvia bridge normalizes these into

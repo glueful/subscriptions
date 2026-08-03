@@ -649,6 +649,30 @@ final class MemberEntitlementResolver
 
 ---
 
+## Amendment: Strict Payvia Lane (Tasks 5–7, executed)
+
+Following the subject-model release, an additional payment-event guarantee was
+shipped: the **strict payment event lane** in payvia 2.4.0. This amendment
+documents Tasks 5–7 of the strict-payment-event-lane plan executed against
+subscriptions 2.0, committed in the payvia repository.
+
+**Tasks executed:**
+
+- **Task 5:** `StrictPayviaSubscriptionEventBridge` with ownership-aware `supports()`
+  gate (closed six-type set + non-empty `gateway_subscription_id` + local-mapping-or-glueful_consumer-marker
+  proof) and single-lane registration (strict|bus|none modes, boot-time skew guard falling back to bus
+  on stale compiled container).
+- **Task 6:** `glueful_consumer` added to ProviderEventData allowlist for customer-identity
+  scoping in strict-mode filtering.
+- **Task 7:** Lane registration modes (strict|bus|none) with boot-time compiled-container
+  tag check. Missing tag in strict mode logs CRITICAL and degrades to bus delivery; cache
+  invalidation via `di:container:compile --force`.
+
+See `docs/superpowers/specs/2026-08-02-strict-payment-event-lane-design.md` in the
+payvia repository for the full design.
+
+---
+
 ## Self-review (performed at write time)
 
 - **Spec coverage:** §1→Task 4; §2→Tasks 5–6; §3→Tasks 1–2, 7–8; §4→Tasks 4, 9, 10; §5→Task 11; §6→Task 10 (+14 docs); §7→Task 9; §8→Tasks 9, 15; §9→Task 12; §10→Task 14; §11.1→Tasks 2, 5; §11.2→Task 9; §11.3→Tasks 7–8; §11.4→Tasks 4, 9, 10; §11.5→Task 10; §11.6→Task 11; §11.7→Tasks 9, 15; §11.8→Task 11; §11.9→Task 12. No uncovered spec section.
