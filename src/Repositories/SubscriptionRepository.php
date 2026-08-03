@@ -5,14 +5,41 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Repositories;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Subscriptions\Subject;
 
-final class SubscriptionRepository
+/**
+ * Intentionally NON-final: the receipts-first projector's test suite subclasses
+ * updateBySubject() to simulate a transient (non-unique-violation) database
+ * failure, proving the whole projection transaction -- including the just-claimed
+ * pending receipt -- rolls back on a genuine error rather than swallowing it.
+ */
+class SubscriptionRepository
 {
-    /** @return array<string,mixed>|null */
+    /**
+     * 1.x facade: the workspace's OWN subscription, i.e. the tenant self-subject
+     * (tenant_uuid, 'tenant', tenant_uuid). Since 2.0 a tenant can also hold user
+     * membership rows, so an unscoped `WHERE tenant_uuid = ?` would be ambiguous --
+     * this delegates to the subject finder instead.
+     *
+     * @return array<string,mixed>|null
+     */
     public function findByTenant(ApplicationContext $context, string $tenantUuid): ?array
     {
+        return $this->findBySubject($context, Subject::tenant($tenantUuid));
+    }
+
+    /**
+     * Subject-aware finder: triple match on (tenant_uuid, subject_type, subject_uuid),
+     * which is exactly the `uniq_subscriptions_subject` unique -- at most one row.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findBySubject(ApplicationContext $context, Subject $subject): ?array
+    {
         return db($context)->table('subscriptions')
-            ->where('tenant_uuid', '=', $tenantUuid)
+            ->where('tenant_uuid', '=', $subject->tenantUuid)
+            ->where('subject_type', '=', $subject->type)
+            ->where('subject_uuid', '=', $subject->uuid)
             ->limit(1)
             ->first();
     }
@@ -36,13 +63,32 @@ final class SubscriptionRepository
         db($context)->table('subscriptions')->insert($this->normalizeJson($data));
     }
 
-    /** @param array<string,mixed> $changes */
+    /**
+     * 1.x facade: updates the workspace's OWN subscription only. Delegating to the
+     * subject updater is what keeps a workspace write from sweeping every user
+     * membership row that shares its tenant_uuid.
+     *
+     * @param array<string,mixed> $changes
+     */
     public function updateByTenant(ApplicationContext $context, string $tenantUuid, array $changes): void
+    {
+        $this->updateBySubject($context, Subject::tenant($tenantUuid), $changes);
+    }
+
+    /**
+     * Subject-aware updater: triple match, so a write can only ever touch the one
+     * row identified by `uniq_subscriptions_subject`.
+     *
+     * @param array<string,mixed> $changes
+     */
+    public function updateBySubject(ApplicationContext $context, Subject $subject, array $changes): void
     {
         $changes['updated_at'] = $this->now($context);
 
         db($context)->table('subscriptions')
-            ->where('tenant_uuid', '=', $tenantUuid)
+            ->where('tenant_uuid', '=', $subject->tenantUuid)
+            ->where('subject_type', '=', $subject->type)
+            ->where('subject_uuid', '=', $subject->uuid)
             ->update($this->normalizeJson($changes));
     }
 

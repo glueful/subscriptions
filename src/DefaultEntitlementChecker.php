@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Subscriptions;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Entitlements\Contracts\EntitlementCheckerInterface;
+use Glueful\Extensions\Subscriptions\Entitlements\EntitlementValue;
 use Glueful\Extensions\Subscriptions\Resolution\EntitlementResolver;
 
 final class DefaultEntitlementChecker implements EntitlementCheckerInterface
@@ -23,7 +24,7 @@ final class DefaultEntitlementChecker implements EntitlementCheckerInterface
             return false;
         }
 
-        return $this->mapAllows($map[$entitlement]);
+        return EntitlementValue::allows($map[$entitlement]);
     }
 
     public function limit(string $tenantUuid, string $entitlement, array $context = []): ?int
@@ -34,27 +35,6 @@ final class DefaultEntitlementChecker implements EntitlementCheckerInterface
         }
 
         return $this->mapLimit($map[$entitlement]);
-    }
-
-    private function mapAllows(mixed $value): bool
-    {
-        if ($value === null || $value === true) {
-            return true;
-        }
-
-        if ($value === false) {
-            return false;
-        }
-
-        if (is_numeric($value)) {
-            return (int) $value > 0;
-        }
-
-        // Fail closed: plan values are validated (bool|int>=0|null) but override
-        // values are JSON-decoded and unvalidated. An unrecognized type (string,
-        // array, object) -- e.g. the JSON string "false" which (bool) would
-        // coerce to true -- denies rather than wrongly grants.
-        return false;
     }
 
     private function mapLimit(mixed $value): ?int
@@ -68,8 +48,8 @@ final class DefaultEntitlementChecker implements EntitlementCheckerInterface
         }
 
         if (is_numeric($value)) {
-            // S3 consistency with mapAllows(): n > 0 is the limit; n <= 0 denies,
-            // so the limit reads 0 -- never a raw negative number.
+            // S3 consistency with EntitlementValue::allows(): n > 0 is the limit;
+            // n <= 0 denies, so the limit reads 0 -- never a raw negative number.
             return max(0, (int) $value);
         }
 

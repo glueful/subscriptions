@@ -20,4 +20,10 @@ final class CapturingLogger extends AbstractLogger
             'context' => $context,
         ];
     }
+
+    /** @return list<array{level:mixed,message:string,context:array<string,mixed>}> */
+    public function records(): array
+    {
+        return $this->records;
+    }
 }

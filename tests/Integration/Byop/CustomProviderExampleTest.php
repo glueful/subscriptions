@@ -8,8 +8,10 @@ use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
 use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
 use Glueful\Extensions\Subscriptions\Projection\SubscriptionEventProjector;
+use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver;
 use Glueful\Extensions\Subscriptions\SubscriptionService;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 
@@ -33,8 +35,10 @@ final class CustomProviderExampleTest extends SubscriptionsTestCase
         $projector = new SubscriptionEventProjector(
             new SubscriptionRepository(),
             new SubscriptionEventRepository(),
+            new ProviderEventReceiptRepository(),
             PlanCatalog::fromContext($this->appContext()),
             $this->appContext(),
+            new DefaultSubjectResolver(),
         );
         $projector->project(new ProviderSubscriptionEvent(
             gateway: 'acme',
@@ -58,6 +62,7 @@ final class CustomProviderExampleTest extends SubscriptionsTestCase
             new SubscriptionEventRepository(),
             PlanCatalog::fromContext($this->appContext()),
             $this->appContext(),
+            new DefaultSubjectResolver(),
             $puller,
         );
         $service->reconcile('tenantA');

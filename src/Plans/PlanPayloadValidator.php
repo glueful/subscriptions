@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Subscriptions\Plans;
 
+use Glueful\Extensions\Subscriptions\SubjectType;
 use InvalidArgumentException;
 
 final class PlanPayloadValidator
@@ -89,6 +90,30 @@ final class PlanPayloadValidator
         }
 
         return $validated;
+    }
+
+    /**
+     * Scope invariant (Task 8, spec §2, migration 006's `subscription_plans.audience`/
+     * `owner_tenant_uuid`): `audience='tenant'` means the platform-owned catalog and
+     * requires an empty owner; `audience='user'` means a workspace-owned membership
+     * catalog entry and requires a non-empty owner. Called by every scope-aware
+     * `PlanManagementService::*InScope()` method before it touches the repository.
+     */
+    public function validateScope(string $audience, string $ownerTenantUuid): void
+    {
+        if (!in_array($audience, [SubjectType::TENANT, SubjectType::USER], true)) {
+            throw new InvalidArgumentException(
+                "audience must be '" . SubjectType::TENANT . "' or '" . SubjectType::USER . "'."
+            );
+        }
+
+        if ($audience === SubjectType::TENANT && $ownerTenantUuid !== '') {
+            throw new InvalidArgumentException("audience 'tenant' requires an empty owner_tenant_uuid.");
+        }
+
+        if ($audience === SubjectType::USER && $ownerTenantUuid === '') {
+            throw new InvalidArgumentException("audience 'user' requires a non-empty owner_tenant_uuid.");
+        }
     }
 
     /**

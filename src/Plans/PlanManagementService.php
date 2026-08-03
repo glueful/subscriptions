@@ -9,8 +9,21 @@ use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Helpers\Utils;
 use Psr\Log\LoggerInterface;
 
+/**
+ * Since the 2.0 activation the five unqualified 1.x methods
+ * (create/update/archive/find/list) are PLATFORM-SCOPE DELEGATES of their
+ * `*InScope` siblings -- `createInScope('tenant', '', …)` and so on. That is what
+ * makes a cross-scope clobber structurally impossible: migration 006 replaced
+ * `UNIQUE(plan_key)` with `UNIQUE(audience, owner_tenant_uuid, plan_key)`, so
+ * before the delegation a `PATCH /plans/{key}` through PlanController could reach
+ * the unscoped `updateByKey()` and mutate a same-keyed WORKSPACE row.
+ * `importConfig()` remains platform-only and never gains a scope parameter.
+ */
 final class PlanManagementService
 {
+    private const PLATFORM_AUDIENCE = 'tenant';
+    private const PLATFORM_OWNER = '';
+
     public function __construct(
         private readonly ApplicationContext $context,
         private readonly SubscriptionPlanRepository $plans,
@@ -24,33 +37,7 @@ final class PlanManagementService
      */
     public function create(array $payload): array
     {
-        $validated = $this->validator->validateCreate($payload);
-
-        if ($this->plans->exists($this->context, (string) $validated['plan_key'])) {
-            throw new \InvalidArgumentException("Plan '{$validated['plan_key']}' already exists.");
-        }
-
-        $now = $this->now();
-        $row = array_merge($validated, [
-            'uuid' => Utils::generateNanoID(12),
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        try {
-            $this->plans->insert($this->context, $row);
-        } catch (\Throwable $e) {
-            if ($this->isUniqueViolation($e)) {
-                throw new \InvalidArgumentException("Plan '{$validated['plan_key']}' already exists.", 0, $e);
-            }
-
-            throw $e;
-        }
-
-        $created = $this->findOrFail((string) $validated['plan_key']);
-        $this->emitAudit($this->auditPayload((string) $validated['plan_key'], 'created', [], $created));
-
-        return $created;
+        return $this->createInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $payload);
     }
 
     /**
@@ -59,35 +46,141 @@ final class PlanManagementService
      */
     public function update(string $planKey, array $payload): array
     {
-        return $this->updateWithAction($planKey, $payload, 'updated');
+        return $this->updateInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $planKey, $payload);
     }
 
     /** @return array<string,mixed> */
     public function archive(string $planKey): array
     {
-        return $this->updateWithAction($planKey, ['status' => 'archived'], 'archived');
+        return $this->archiveInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $planKey);
+    }
+
+    /** @return list<array<string,mixed>> */
+    public function list(): array
+    {
+        return $this->listInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER);
+    }
+
+    /** @return array<string,mixed>|null */
+    public function find(string $planKey): ?array
+    {
+        return $this->findInScope(self::PLATFORM_AUDIENCE, self::PLATFORM_OWNER, $planKey);
     }
 
     /**
      * @param array<string,mixed> $payload
      * @return array<string,mixed>
      */
-    private function updateWithAction(string $planKey, array $payload, string $action): array
+    public function createInScope(string $audience, string $ownerTenantUuid, array $payload): array
     {
+        $this->validator->validateScope($audience, $ownerTenantUuid);
+        $validated = $this->validator->validateCreate($payload);
+        $planKey = (string) $validated['plan_key'];
+
+        if ($this->plans->findByKeyInScope($this->context, $audience, $ownerTenantUuid, $planKey) !== null) {
+            throw new \InvalidArgumentException("Plan '{$planKey}' already exists.");
+        }
+
+        $now = $this->now();
+        $row = array_merge($validated, [
+            'uuid' => Utils::generateNanoID(12),
+            'audience' => $audience,
+            'owner_tenant_uuid' => $ownerTenantUuid,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        try {
+            $this->plans->insert($this->context, $row);
+        } catch (\Throwable $e) {
+            if ($this->isUniqueViolation($e)) {
+                throw new \InvalidArgumentException("Plan '{$planKey}' already exists.", 0, $e);
+            }
+
+            throw $e;
+        }
+
+        $created = $this->findInScopeOrFail($audience, $ownerTenantUuid, $planKey);
+        $this->emitAudit($this->auditPayload($planKey, 'created', [], $created));
+
+        return $created;
+    }
+
+    /**
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
+    public function updateInScope(
+        string $audience,
+        string $ownerTenantUuid,
+        string $planKey,
+        array $payload
+    ): array {
+        return $this->updateInScopeWithAction($audience, $ownerTenantUuid, $planKey, $payload, 'updated');
+    }
+
+    /** @return array<string,mixed> */
+    public function archiveInScope(string $audience, string $ownerTenantUuid, string $planKey): array
+    {
+        return $this->updateInScopeWithAction(
+            $audience,
+            $ownerTenantUuid,
+            $planKey,
+            ['status' => 'archived'],
+            'archived'
+        );
+    }
+
+    /** @return array<string,mixed>|null */
+    public function findInScope(string $audience, string $ownerTenantUuid, string $planKey): ?array
+    {
+        $this->validator->validateScope($audience, $ownerTenantUuid);
+
+        return $this->plans->findByKeyInScope($this->context, $audience, $ownerTenantUuid, $planKey);
+    }
+
+    /** @return list<array<string,mixed>> */
+    public function listInScope(string $audience, string $ownerTenantUuid): array
+    {
+        $this->validator->validateScope($audience, $ownerTenantUuid);
+
+        return $this->plans->listInScope($this->context, $audience, $ownerTenantUuid);
+    }
+
+    /**
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
+    private function updateInScopeWithAction(
+        string $audience,
+        string $ownerTenantUuid,
+        string $planKey,
+        array $payload,
+        string $action
+    ): array {
+        $this->validator->validateScope($audience, $ownerTenantUuid);
+
         $audit = null;
 
-        $row = db($this->context)->transaction(function () use ($planKey, $payload, $action, &$audit): array {
-            $before = $this->findOrFail($planKey);
-            $changes = $this->validator->validatePatch($payload, $before);
-            $changes['updated_at'] = $this->now();
+        $row = db($this->context)->transaction(
+            function () use ($audience, $ownerTenantUuid, $planKey, $payload, $action, &$audit): array {
+                $before = $this->findInScopeOrFail($audience, $ownerTenantUuid, $planKey);
 
-            $this->plans->updateByKey($this->context, $planKey, $changes);
+                if (array_key_exists('plan_key', $payload) && $payload['plan_key'] !== $before['plan_key']) {
+                    throw new \InvalidArgumentException('plan_key is immutable');
+                }
 
-            $after = $this->findOrFail($planKey);
-            $audit = $this->auditPayload($planKey, $action, $before, $after);
+                $changes = $this->validator->validatePatch($payload, $before);
+                $changes['updated_at'] = $this->now();
 
-            return $after;
-        });
+                $this->plans->updateByKeyInScope($this->context, $audience, $ownerTenantUuid, $planKey, $changes);
+
+                $after = $this->findInScopeOrFail($audience, $ownerTenantUuid, $planKey);
+                $audit = $this->auditPayload($planKey, $action, $before, $after);
+
+                return $after;
+            }
+        );
 
         if (is_array($audit)) {
             $this->emitAudit($audit);
@@ -96,7 +189,24 @@ final class PlanManagementService
         return $row;
     }
 
-    /** @return list<array<string,mixed>> */
+    /** @return array<string,mixed> */
+    private function findInScopeOrFail(string $audience, string $ownerTenantUuid, string $planKey): array
+    {
+        $row = $this->plans->findByKeyInScope($this->context, $audience, $ownerTenantUuid, $planKey);
+        if ($row === null) {
+            throw new \InvalidArgumentException("Plan '{$planKey}' does not exist.");
+        }
+
+        return $row;
+    }
+
+    /**
+     * Seeds the PLATFORM catalog from `subscriptions.plans` (spec §10: config plans
+     * are seeds, not a runtime overlay). Platform-only by contract -- workspace
+     * catalogs are never config-derived.
+     *
+     * @return list<array<string,mixed>>
+     */
     public function importConfig(bool $force = false, string $status = 'active'): array
     {
         $plans = (array) config($this->context, 'subscriptions.plans', []);
@@ -108,7 +218,7 @@ final class PlanManagementService
             }
 
             $payload = $this->validator->validateImportConfigPlan($planKey, $configPlan, $status);
-            $existing = $this->plans->findByKey($this->context, $planKey);
+            $existing = $this->find($planKey);
 
             if ($existing !== null && !$force) {
                 continue;
@@ -124,29 +234,6 @@ final class PlanManagementService
         }
 
         return $imported;
-    }
-
-    /** @return list<array<string,mixed>> */
-    public function list(): array
-    {
-        return $this->plans->list($this->context);
-    }
-
-    /** @return array<string,mixed>|null */
-    public function find(string $planKey): ?array
-    {
-        return $this->plans->findByKey($this->context, $planKey);
-    }
-
-    /** @return array<string,mixed> */
-    private function findOrFail(string $planKey): array
-    {
-        $row = $this->find($planKey);
-        if ($row === null) {
-            throw new \InvalidArgumentException("Plan '{$planKey}' does not exist.");
-        }
-
-        return $row;
     }
 
     private function now(): string
@@ -188,16 +275,26 @@ final class PlanManagementService
         return $diff;
     }
 
-    /** @param array<string,mixed> $payload */
+    /**
+     * Defer the emission to Connection::afterCommit(): outside a transaction it
+     * runs immediately, but nested under a caller's outer transaction it queues
+     * until that outer transaction commits, and is discarded entirely on rollback
+     * -- suppressing
+     * false "plan changed" audits for changes that never actually persisted.
+     *
+     * @param array<string,mixed> $payload
+     */
     private function emitAudit(array $payload): void
     {
-        $logger = $this->resolveLogger();
-        if ($logger !== null) {
-            $logger->info('subscriptions.plan_changed', $payload);
-            return;
-        }
+        db($this->context)->afterCommit(function () use ($payload): void {
+            $logger = $this->resolveLogger();
+            if ($logger !== null) {
+                $logger->info('subscriptions.plan_changed', $payload);
+                return;
+            }
 
-        error_log('[Subscriptions] subscriptions.plan_changed ' . json_encode($payload, JSON_THROW_ON_ERROR));
+            error_log('[Subscriptions] subscriptions.plan_changed ' . json_encode($payload, JSON_THROW_ON_ERROR));
+        });
     }
 
     private function resolveLogger(): ?LoggerInterface

@@ -14,17 +14,50 @@ use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
 use Glueful\Helpers\Utils;
 use Psr\Container\ContainerInterface;
 
+/**
+ * FLIPPED at the 2.0 activation. Every case here used to assert the 1.x
+ * CONFIG-OVERLAY contract -- "a DB row wins, but a missing/non-resolvable DB row
+ * falls back to `subscriptions.plans.*`". That overlay is gone: `fromContext()` is
+ * now exactly `forScope('tenant', '')`, DB-authoritative, and config plans are
+ * SEEDS (import them) rather than a runtime fallback (spec §3, §10).
+ *
+ * The same-named cases below therefore assert the inverse where the contract
+ * inverted, so the diff for this file is itself the proof that the overlay was
+ * removed rather than merely bypassed.
+ */
 final class ManagedPlanCatalogTest extends SubscriptionsTestCase
 {
-    public function testEmptySubscriptionPlansTableFallsBackToConfig(): void
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // This suite owns the catalog: it asserts on resolution of 'pro' in states
+        // the harness's platform seed would pre-empt.
+        $this->clearPlatformPlans();
+    }
+
+    public function testFromContextIsThePlatformScope(): void
     {
         $catalog = PlanCatalog::fromContext($this->appContext());
 
-        self::assertSame(50, $catalog->entitlementsFor('pro')['projects.limit']);
-        self::assertTrue($catalog->isAssignable('pro'));
+        self::assertSame('tenant', $catalog->audience());
+        self::assertSame('', $catalog->ownerTenantUuid());
+        self::assertSame('free', $catalog->defaultPlan());
     }
 
-    public function testActiveDbPlanOverridesConfigPlan(): void
+    public function testEmptySubscriptionPlansTableResolvesNothing(): void
+    {
+        // Was: "falls back to config". 'pro' IS a config plan -- and now resolves to
+        // nothing at all, because no DB row backs it.
+        $catalog = PlanCatalog::fromContext($this->appContext());
+
+        self::assertSame([], $catalog->entitlementsFor('pro'));
+        self::assertFalse($catalog->planExists('pro'));
+        self::assertFalse($catalog->isAssignable('pro'));
+        self::assertNull($catalog->planUuidForKey('pro'));
+    }
+
+    public function testActiveDbPlanResolvesAndIsAssignable(): void
     {
         $this->seedPlan([
             'plan_key' => 'pro',
@@ -38,7 +71,7 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
         self::assertTrue($catalog->isAssignable('pro'));
     }
 
-    public function testArchivedDbPlanOverridesConfigAndResolvesButIsNotAssignable(): void
+    public function testArchivedDbPlanResolvesButIsNotAssignable(): void
     {
         $this->seedPlan([
             'plan_key' => 'pro',
@@ -52,8 +85,10 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
         self::assertFalse($catalog->isAssignable('pro'));
     }
 
-    public function testDraftDbPlanFallsBackToConfigWhenConfigExists(): void
+    public function testDraftDbPlanExistsButNeitherResolvesNorFallsBackToConfig(): void
     {
+        // Was: "falls back to config when config exists". A draft plan is not
+        // resolvable, and there is nothing behind it any more.
         $this->seedPlan([
             'plan_key' => 'pro',
             'entitlements' => ['projects.limit' => 999],
@@ -62,41 +97,28 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
 
         $catalog = PlanCatalog::fromContext($this->appContext());
 
-        self::assertSame(50, $catalog->entitlementsFor('pro')['projects.limit']);
+        self::assertSame([], $catalog->entitlementsFor('pro'));
+        self::assertTrue($catalog->planExists('pro'));
         self::assertFalse($catalog->isAssignable('pro'));
     }
 
-    public function testDbOnlyDraftPlanResolvesToEmptyMap(): void
+    public function testConfigPlanIsNeverAssignableWithoutADbRow(): void
     {
-        $this->seedPlan([
-            'plan_key' => 'future',
-            'entitlements' => ['projects.limit' => 999],
-            'status' => 'draft',
-        ]);
-
+        // Was: "assignable only when no DB row exists" -- exactly inverted.
         $catalog = PlanCatalog::fromContext($this->appContext());
+        self::assertFalse($catalog->isAssignable('free'));
 
-        self::assertSame([], $catalog->entitlementsFor('future'));
-        self::assertTrue($catalog->planExists('future'));
-        self::assertFalse($catalog->isAssignable('future'));
+        $this->seedPlan(['plan_key' => 'free', 'status' => 'active']);
+
+        self::assertTrue(PlanCatalog::fromContext($this->appContext())->isAssignable('free'));
     }
 
-    public function testConfigPlanIsAssignableOnlyWhenNoDbRowExists(): void
-    {
-        $catalog = PlanCatalog::fromContext($this->appContext());
-        self::assertTrue($catalog->isAssignable('free'));
-
-        $this->seedPlan([
-            'plan_key' => 'free',
-            'status' => 'archived',
-        ]);
-
-        self::assertFalse(PlanCatalog::fromContext($this->appContext())->isAssignable('free'));
-    }
-
-    public function testPricedPlanUuidPrefersResolvableDbPlanOverConfig(): void
+    public function testProviderPriceIdComesFromTheDbRowAndNeverFromConfig(): void
     {
         $this->setConfig('subscriptions.plans.pro.provider_price_id', 'configPrice1');
+
+        self::assertNull(PlanCatalog::fromContext($this->appContext())->providerPriceId('pro'));
+
         $this->seedPlan([
             'plan_key' => 'pro',
             'provider_price_id' => 'dbPrice0001',
@@ -106,14 +128,15 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
         self::assertSame('dbPrice0001', PlanCatalog::fromContext($this->appContext())->providerPriceId('pro'));
     }
 
-    public function testVersionChangesWhenDbPlanUpdatedAtChanges(): void
+    public function testVersionIsScopedAndChangesWhenDbPlanUpdatedAtChanges(): void
     {
         $this->seedPlan([
             'plan_key' => 'pro',
             'updated_at' => '2026-06-10 10:00:00',
         ]);
-        $catalog = PlanCatalog::fromContext($this->appContext());
-        $before = $catalog->version();
+        $before = PlanCatalog::fromContext($this->appContext())->version();
+
+        self::assertSame('tenant::2026-06-10 10:00:00', $before);
 
         $this->connection()->table('subscription_plans')
             ->where('plan_key', '=', 'pro')
@@ -122,15 +145,27 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
         self::assertNotSame($before, PlanCatalog::fromContext($this->appContext())->version());
     }
 
-    public function testNoTableFallbackBehavesAsConfigOnly(): void
+    public function testVersionCarriesNoConfigHash(): void
     {
-        $context = $this->contextWithoutPlanTable();
-        $catalog = PlanCatalog::fromContext($context);
+        // Was: the version folded a hash of `subscriptions.plans`. With no overlay,
+        // config cannot change what resolves, so it must not move the cache key.
+        $before = PlanCatalog::fromContext($this->appContext())->version();
 
-        self::assertSame(50, $catalog->entitlementsFor('pro')['projects.limit']);
-        self::assertTrue($catalog->planExists('pro'));
-        self::assertTrue($catalog->isAssignable('pro'));
-        self::assertSame('none', substr($catalog->version(), -4));
+        $this->setConfig('subscriptions.plans.pro.entitlements', ['projects.limit' => 4242]);
+
+        self::assertSame($before, PlanCatalog::fromContext($this->appContext())->version());
+    }
+
+    public function testNoTableFallbackResolvesNothingRatherThanConfig(): void
+    {
+        // Was: "behaves as config-only". A missing plan table now means an empty
+        // catalog -- the read is guarded so it degrades instead of throwing.
+        $catalog = PlanCatalog::fromContext($this->contextWithoutPlanTable());
+
+        self::assertSame([], $catalog->entitlementsFor('pro'));
+        self::assertFalse($catalog->planExists('pro'));
+        self::assertFalse($catalog->isAssignable('pro'));
+        self::assertSame('tenant::none', $catalog->version());
     }
 
     /** @param array<string,mixed> $overrides */
@@ -147,6 +182,8 @@ final class ManagedPlanCatalogTest extends SubscriptionsTestCase
             'sort_order' => 10,
             'created_at' => '2026-06-10 10:00:00',
             'updated_at' => '2026-06-10 10:00:00',
+            'audience' => 'tenant',
+            'owner_tenant_uuid' => '',
         ], $this->normalizePlanOverrides($overrides)));
     }
 

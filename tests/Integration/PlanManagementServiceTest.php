@@ -18,6 +18,12 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // This suite drives the platform catalog end to end (including
+        // importConfig, which seeds exactly the keys the harness pre-seeds), so it
+        // starts from an empty table.
+        $this->clearPlatformPlans();
+
         $this->service = new PlanManagementService(
             $this->appContext(),
             new SubscriptionPlanRepository(),
@@ -187,5 +193,39 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         $row = $this->service->update('team', ['display_name' => 'Team Plus']);
 
         self::assertSame('Team Plus', $row['display_name']);
+    }
+
+    public function testAuditEmissionIsDeferredToOuterTransactionCommit(): void
+    {
+        $logger = new CapturingLogger();
+        $this->bind(LoggerInterface::class, $logger);
+
+        db($this->appContext())->transaction(function (): void {
+            $this->service->create($this->payload('team-a'));
+            $this->service->create($this->payload('team-b'));
+        });
+
+        self::assertCount(2, $logger->records());
+        self::assertSame('team-a', $logger->records()[0]['context']['plan_key']);
+        self::assertSame('team-b', $logger->records()[1]['context']['plan_key']);
+    }
+
+    public function testAuditEmissionIsDiscardedOnOuterTransactionRollback(): void
+    {
+        $logger = new CapturingLogger();
+        $this->bind(LoggerInterface::class, $logger);
+
+        try {
+            db($this->appContext())->transaction(function (): void {
+                $this->service->create($this->payload('team-a'));
+                throw new \RuntimeException('force rollback');
+            });
+            self::fail('Expected the transaction to roll back.');
+        } catch (\RuntimeException $e) {
+            self::assertSame('force rollback', $e->getMessage());
+        }
+
+        self::assertSame([], $logger->records());
+        self::assertNull($this->service->find('team-a'));
     }
 }

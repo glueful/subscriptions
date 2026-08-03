@@ -22,6 +22,8 @@ final class SubscriptionEventRepositoryTest extends SubscriptionsTestCase
     {
         return array_merge([
             'tenant_uuid' => 'tenantA',
+            'subject_type' => 'tenant',
+            'subject_uuid' => 'tenantA',
             'type' => 'subscription.past_due',
             'source' => 'provider_event',
             'provider_gateway' => 'paystack',

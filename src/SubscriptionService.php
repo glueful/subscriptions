@@ -7,13 +7,25 @@ namespace Glueful\Extensions\Subscriptions;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Subscriptions\Catalog\PlanCatalog;
 use Glueful\Extensions\Subscriptions\Contracts\ProviderStatePullerInterface;
+use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
+use Glueful\Extensions\Subscriptions\Lifecycle\TenantIntegration;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Repositories\UniqueViolations;
 use Glueful\Helpers\Utils;
 
 /**
- * Tenant subscription lifecycle -- works fully with NO payment provider
- * installed (free/trial/comp subscriptions never touch a payment object).
+ * Subject-aware subscription lifecycle (spec §7) -- works fully with NO payment
+ * provider installed (free/trial/comp subscriptions never touch a payment object).
+ *
+ * The `…For(Subject …)` methods are the core. The 1.x tenant methods are
+ * PRESERVED FACADES (not deprecated: they are the supported API for the
+ * workspace-billing product) that delegate with `Subject::tenant($tenantUuid)`
+ * and a platform-catalog planKey -> planUuid lookup.
+ *
+ * Every state change commits together with its lifecycle event in one
+ * transaction (spec §8), and every write is gated on
+ * SubjectResolverInterface::validate() plus a plan-audience match.
  *
  * Holds the ApplicationContext from construction, so methods take no $ctx.
  */
@@ -26,29 +38,49 @@ final class SubscriptionService
         private readonly SubscriptionEventRepository $events,
         private readonly PlanCatalog $catalog,
         private readonly ApplicationContext $context,
+        private readonly SubjectResolverInterface $subjects,
         private readonly ?ProviderStatePullerInterface $puller = null,
     ) {
     }
 
+    // ===========================================
+    // Subject-aware core (spec §7)
+    // ===========================================
+
     /** @return array<string,mixed>|null */
-    public function current(string $tenantUuid): ?array
+    public function currentFor(Subject $subject): ?array
     {
-        return $this->subscriptions->findByTenant($this->context, $tenantUuid);
+        $this->assertValidSubject($subject);
+
+        return TenantIntegration::runAsTenantOr(
+            $this->context,
+            $subject->tenantUuid,
+            fn (): ?array => $this->subscriptions->findBySubject($this->context, $subject)
+        );
     }
 
     /**
      * @param array<string,mixed> $opts status, trial_ends_at, current_period_end, provider_* keys, metadata
      * @return array<string,mixed>
+     * @throws SubscriptionConflictException when a concurrent caller won the subject
+     *         unique with a DIFFERENT plan (spec §8); this call then changes nothing.
      */
-    public function start(string $tenantUuid, string $planKey, array $opts = []): array
+    public function startFor(Subject $subject, string $planUuid, array $opts = []): array
     {
-        $this->assertAssignablePlan($planKey);
+        $this->assertValidSubject($subject);
+        $plan = $this->requireAssignablePlan($subject, $planUuid);
 
         $status = (string) ($opts['status'] ?? 'active');
+        $planKey = (string) ($plan['plan_key'] ?? '');
 
         $row = [
             'uuid' => Utils::generateNanoID(12),
-            'tenant_uuid' => $tenantUuid,
+            'tenant_uuid' => $subject->tenantUuid,
+            'subject_type' => $subject->type,
+            'subject_uuid' => $subject->uuid,
+            // Both references are written: plan_uuid is authoritative, plan_key is
+            // the denormalized copy read off the plan row (never off the caller).
+            'plan_uuid' => $planUuid,
             'plan_key' => $planKey,
             'status' => $status,
             'trial_ends_at' => $opts['trial_ends_at'] ?? null,
@@ -57,97 +89,139 @@ final class SubscriptionService
             'provider_customer_id' => $opts['provider_customer_id'] ?? null,
             'provider_subscription_id' => $opts['provider_subscription_id'] ?? null,
             'provider_price_id' => $opts['provider_price_id']
-                ?? $this->catalog->providerPriceId($planKey),
+                ?? $this->stringOrNull($plan['provider_price_id'] ?? null),
             'metadata' => $opts['metadata'] ?? null,
         ];
 
-        $this->subscriptions->insert($this->context, $row);
+        return TenantIntegration::runAsTenantOr(
+            $this->context,
+            $subject->tenantUuid,
+            function () use ($row, $subject, $planUuid, $planKey, $status): array {
+                $winner = db($this->context)->transaction(
+                    function () use ($row, $subject, $planUuid, $planKey, $status): ?array {
+                        try {
+                            // NESTED transaction => SAVEPOINT (spec §8): a unique violation
+                            // rolls back only to the savepoint, so the surrounding
+                            // transaction stays usable and the re-read below can run --
+                            // on PostgreSQL an un-isolated violation would poison it.
+                            db($this->context)->transaction(function () use ($row): void {
+                                $this->subscriptions->insert($this->context, $row);
+                            });
+                        } catch (\Throwable $e) {
+                            if (!UniqueViolations::isUniqueViolation($e)) {
+                                throw $e;
+                            }
 
-        $this->events->append($this->context, [
-            'tenant_uuid' => $tenantUuid,
-            'type' => 'created',
-            'from_status' => null,
-            'to_status' => $status,
-            'source' => 'manual',
-            'data' => ['plan_key' => $planKey],
-        ]);
+                            return $this->resolveLostRace($subject, $planUuid, $e);
+                        }
 
-        return $this->requireCurrent($tenantUuid);
+                        $this->appendEvent($subject, [
+                            'type' => 'created',
+                            'from_status' => null,
+                            'to_status' => $status,
+                            'source' => 'manual',
+                            'data' => ['plan_key' => $planKey],
+                        ]);
+
+                        return null;
+                    }
+                );
+
+                return $winner ?? $this->requireCurrentFor($subject);
+            }
+        );
     }
 
     /** @return array<string,mixed> */
-    public function changePlan(string $tenantUuid, string $planKey): array
+    public function changePlanFor(Subject $subject, string $planUuid): array
     {
-        $this->assertAssignablePlan($planKey);
+        $this->assertValidSubject($subject);
+        $plan = $this->requireAssignablePlan($subject, $planUuid);
+        $planKey = (string) ($plan['plan_key'] ?? '');
 
-        $current = $this->requireCurrent($tenantUuid);
-        $fromPlan = (string) ($current['plan_key'] ?? '');
+        return TenantIntegration::runAsTenantOr(
+            $this->context,
+            $subject->tenantUuid,
+            function () use ($subject, $planUuid, $plan, $planKey): array {
+                db($this->context)->transaction(function () use ($subject, $planUuid, $plan, $planKey): void {
+                    $current = $this->requireCurrentFor($subject);
+                    $fromPlan = (string) ($current['plan_key'] ?? '');
 
-        $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
-            'plan_key' => $planKey,
-            'provider_price_id' => $this->catalog->providerPriceId($planKey),
-        ]);
+                    $this->subscriptions->updateBySubject($this->context, $subject, [
+                        'plan_uuid' => $planUuid,
+                        'plan_key' => $planKey,
+                        'provider_price_id' => $this->stringOrNull($plan['provider_price_id'] ?? null),
+                    ]);
 
-        $this->events->append($this->context, [
-            'tenant_uuid' => $tenantUuid,
-            'type' => 'plan_changed',
-            'from_status' => $current['status'] ?? null,
-            'to_status' => $current['status'] ?? null,
-            'source' => 'manual',
-            'data' => ['from_plan' => $fromPlan, 'to_plan' => $planKey],
-        ]);
+                    $this->appendEvent($subject, [
+                        'type' => 'plan_changed',
+                        'from_status' => $current['status'] ?? null,
+                        'to_status' => $current['status'] ?? null,
+                        'source' => 'manual',
+                        'data' => ['from_plan' => $fromPlan, 'to_plan' => $planKey],
+                    ]);
+                });
 
-        return $this->requireCurrent($tenantUuid);
+                return $this->requireCurrentFor($subject);
+            }
+        );
     }
 
     /** @return array<string,mixed> */
-    public function cancel(string $tenantUuid, bool $atPeriodEnd = true): array
+    public function cancelFor(Subject $subject, bool $atPeriodEnd = true): array
     {
-        $current = $this->requireCurrent($tenantUuid);
-        $fromStatus = (string) ($current['status'] ?? '');
+        $this->assertValidSubject($subject);
 
-        if ($atPeriodEnd) {
-            // Keep the status until the period ends -- just flag the intent.
-            $metadata = $this->decodeMetadata($current['metadata'] ?? null);
-            $metadata['cancel_at_period_end'] = true;
+        return TenantIntegration::runAsTenantOr(
+            $this->context,
+            $subject->tenantUuid,
+            function () use ($subject, $atPeriodEnd): array {
+                db($this->context)->transaction(function () use ($subject, $atPeriodEnd): void {
+                    $current = $this->requireCurrentFor($subject);
+                    $fromStatus = (string) ($current['status'] ?? '');
 
-            $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
-                'metadata' => $metadata,
-            ]);
-            $toStatus = $fromStatus;
-        } else {
-            $this->subscriptions->updateByTenant($this->context, $tenantUuid, [
-                'status' => 'canceled',
-                'canceled_at' => $this->now(),
-            ]);
-            $toStatus = 'canceled';
-        }
+                    if ($atPeriodEnd) {
+                        // Keep the status until the period ends -- just flag the intent.
+                        $metadata = $this->decodeMetadata($current['metadata'] ?? null);
+                        $metadata['cancel_at_period_end'] = true;
 
-        $this->events->append($this->context, [
-            'tenant_uuid' => $tenantUuid,
-            'type' => 'canceled',
-            'from_status' => $fromStatus,
-            'to_status' => $toStatus,
-            'source' => 'manual',
-            'data' => ['at_period_end' => $atPeriodEnd],
-        ]);
+                        $this->subscriptions->updateBySubject($this->context, $subject, ['metadata' => $metadata]);
+                        $toStatus = $fromStatus;
+                    } else {
+                        $this->subscriptions->updateBySubject($this->context, $subject, [
+                            'status' => 'canceled',
+                            'canceled_at' => $this->now(),
+                        ]);
+                        $toStatus = 'canceled';
+                    }
 
-        return $this->requireCurrent($tenantUuid);
+                    $this->appendEvent($subject, [
+                        'type' => 'canceled',
+                        'from_status' => $fromStatus,
+                        'to_status' => $toStatus,
+                        'source' => 'manual',
+                        'data' => ['at_period_end' => $atPeriodEnd],
+                    ]);
+                });
+
+                return $this->requireCurrentFor($subject);
+            }
+        );
     }
 
     /**
      * Pull authoritative provider state and re-derive local status (S8).
      *
      * The provider is a SOFT dependency: with no puller injected this is a
-     * safe no-op returning the current row. Drift (status/period)
-     * is applied via updateByTenant and recorded as a `reconciled` event
-     * (source `reconcile`, NULL logical key -- multiple NULLs are allowed).
+     * safe no-op returning the current row. Drift (status/period) is applied
+     * and recorded as a `reconciled` event (source `reconcile`, NULL logical
+     * key -- multiple NULLs are allowed) in ONE transaction.
      *
      * @return array<string,mixed>|null
      */
-    public function reconcile(string $tenantUuid): ?array
+    public function reconcileFor(Subject $subject): ?array
     {
-        $current = $this->current($tenantUuid);
+        $current = $this->currentFor($subject);
         if ($current === null) {
             return null;
         }
@@ -171,20 +245,168 @@ final class SubscriptionService
         $fromStatus = (string) ($current['status'] ?? '');
         $toStatus = (string) ($changes['status'] ?? $fromStatus);
 
-        $this->subscriptions->updateByTenant($this->context, $tenantUuid, $changes);
+        return TenantIntegration::runAsTenantOr(
+            $this->context,
+            $subject->tenantUuid,
+            function () use ($subject, $changes, $fromStatus, $toStatus, $gateway, $state): ?array {
+                db($this->context)->transaction(
+                    function () use ($subject, $changes, $fromStatus, $toStatus, $gateway, $state): void {
+                        $this->subscriptions->updateBySubject($this->context, $subject, $changes);
 
-        $this->events->append($this->context, [
-            'tenant_uuid' => $tenantUuid,
-            'type' => 'reconciled',
-            'from_status' => $fromStatus,
-            'to_status' => $toStatus,
-            'source' => 'reconcile',
-            'provider_gateway' => $gateway !== '' ? $gateway : null,
-            'provider_logical_event_key' => null,
-            'data' => $state,
-        ]);
+                        $this->appendEvent($subject, [
+                            'type' => 'reconciled',
+                            'from_status' => $fromStatus,
+                            'to_status' => $toStatus,
+                            'source' => 'reconcile',
+                            'provider_gateway' => $gateway !== '' ? $gateway : null,
+                            'provider_logical_event_key' => null,
+                            'data' => $state,
+                        ]);
+                    }
+                );
 
-        return $this->current($tenantUuid);
+                return $this->subscriptions->findBySubject($this->context, $subject);
+            }
+        );
+    }
+
+    // ===========================================
+    // Preserved 1.x tenant facade (spec §7)
+    // ===========================================
+
+    /** @return array<string,mixed>|null */
+    public function current(string $tenantUuid): ?array
+    {
+        return $this->currentFor(Subject::tenant($tenantUuid));
+    }
+
+    /**
+     * @param array<string,mixed> $opts status, trial_ends_at, current_period_end, provider_* keys, metadata
+     * @return array<string,mixed>
+     */
+    public function start(string $tenantUuid, string $planKey, array $opts = []): array
+    {
+        return $this->startFor(Subject::tenant($tenantUuid), $this->platformPlanUuid($planKey), $opts);
+    }
+
+    /** @return array<string,mixed> */
+    public function changePlan(string $tenantUuid, string $planKey): array
+    {
+        return $this->changePlanFor(Subject::tenant($tenantUuid), $this->platformPlanUuid($planKey));
+    }
+
+    /** @return array<string,mixed> */
+    public function cancel(string $tenantUuid, bool $atPeriodEnd = true): array
+    {
+        return $this->cancelFor(Subject::tenant($tenantUuid), $atPeriodEnd);
+    }
+
+    /** @return array<string,mixed>|null */
+    public function reconcile(string $tenantUuid): ?array
+    {
+        return $this->reconcileFor(Subject::tenant($tenantUuid));
+    }
+
+    // ===========================================
+    // Internals
+    // ===========================================
+
+    /**
+     * planKey -> planUuid in the platform catalog (spec §7). An unknown key can
+     * never be assignable, so it fails with the 1.x message rather than a
+     * uuid-shaped one the facade's callers have never seen.
+     */
+    private function platformPlanUuid(string $planKey): string
+    {
+        $uuid = $this->catalog->planUuidForKey($planKey);
+        if ($uuid === null) {
+            throw new \InvalidArgumentException("Plan '{$planKey}' is not assignable.");
+        }
+
+        return $uuid;
+    }
+
+    private function assertValidSubject(Subject $subject): void
+    {
+        if (!$this->subjects->validate($this->context, $subject)) {
+            throw new \InvalidArgumentException('invalid subject');
+        }
+    }
+
+    /**
+     * Assignability + subject/plan audience match (spec §4): a `tenant` subject may
+     * only hold a platform plan ('tenant', ''); a `user` subject only an
+     * `audience='user'` plan owned by that same workspace.
+     *
+     * @return array<string,mixed>
+     */
+    private function requireAssignablePlan(Subject $subject, string $planUuid): array
+    {
+        $plan = $this->catalog->planForUuid($planUuid);
+        if ($plan === null || ($plan['status'] ?? null) !== 'active') {
+            $label = $plan !== null ? (string) ($plan['plan_key'] ?? $planUuid) : $planUuid;
+            throw new \InvalidArgumentException("Plan '{$label}' is not assignable.");
+        }
+
+        [$audience, $owner] = $subject->type === SubjectType::USER
+            ? [SubjectType::USER, $subject->tenantUuid]
+            : [SubjectType::TENANT, ''];
+
+        if (
+            (string) ($plan['audience'] ?? '') !== $audience
+            || (string) ($plan['owner_tenant_uuid'] ?? '') !== $owner
+        ) {
+            throw new \InvalidArgumentException(sprintf(
+                "Plan '%s' (audience '%s', owner '%s') is not available to subject '%s:%s' in tenant '%s'.",
+                (string) ($plan['plan_key'] ?? $planUuid),
+                (string) ($plan['audience'] ?? ''),
+                (string) ($plan['owner_tenant_uuid'] ?? ''),
+                $subject->type,
+                $subject->uuid,
+                $subject->tenantUuid
+            ));
+        }
+
+        return $plan;
+    }
+
+    /**
+     * A lost insert race: re-read the winner through the SAME subject triple.
+     * Same plan_uuid -> return it idempotently; a different plan_uuid -> stable
+     * domain conflict (spec §8). A unique violation that is NOT the subject
+     * unique (e.g. the provider-subscription unique) finds no winner row and is
+     * rethrown untouched rather than being misreported as a subject conflict.
+     *
+     * @return array<string,mixed>
+     */
+    private function resolveLostRace(Subject $subject, string $planUuid, \Throwable $violation): array
+    {
+        $winner = $this->subscriptions->findBySubject($this->context, $subject);
+        if ($winner === null) {
+            throw $violation;
+        }
+
+        $winningPlanUuid = (string) ($winner['plan_uuid'] ?? '');
+        if ($winningPlanUuid !== $planUuid) {
+            throw SubscriptionConflictException::forSubject($subject, $planUuid, $winningPlanUuid);
+        }
+
+        return $winner;
+    }
+
+    /**
+     * Every lifecycle event carries the subject triple explicitly -- the repository's
+     * transitional tenant-only derivation is gone as of the 2.0 activation.
+     *
+     * @param array<string,mixed> $event
+     */
+    private function appendEvent(Subject $subject, array $event): void
+    {
+        $this->events->insertOrThrow($this->context, array_merge([
+            'tenant_uuid' => $subject->tenantUuid,
+            'subject_type' => $subject->type,
+            'subject_uuid' => $subject->uuid,
+        ], $event));
     }
 
     /**
@@ -239,21 +461,26 @@ final class SubscriptionService
     }
 
     /** @return array<string,mixed> */
-    private function requireCurrent(string $tenantUuid): array
+    private function requireCurrentFor(Subject $subject): array
     {
-        $row = $this->current($tenantUuid);
+        $row = $this->subscriptions->findBySubject($this->context, $subject);
         if ($row === null) {
-            throw new \RuntimeException("No subscription for tenant '{$tenantUuid}'.");
+            if ($subject->type === SubjectType::TENANT) {
+                throw new \RuntimeException("No subscription for tenant '{$subject->tenantUuid}'.");
+            }
+
+            throw new \RuntimeException(
+                "No subscription for subject '{$subject->type}:{$subject->uuid}' "
+                . "in tenant '{$subject->tenantUuid}'."
+            );
         }
 
         return $row;
     }
 
-    private function assertAssignablePlan(string $planKey): void
+    private function stringOrNull(mixed $value): ?string
     {
-        if (!$this->catalog->isAssignable($planKey)) {
-            throw new \InvalidArgumentException("Plan '{$planKey}' is not assignable.");
-        }
+        return is_scalar($value) && (string) $value !== '' ? (string) $value : null;
     }
 
     /** @return array<string,mixed> */

@@ -26,6 +26,9 @@ final class PlanControllerTest extends SubscriptionsTestCase
     {
         parent::setUp();
 
+        // The controller suite builds and asserts on the whole platform catalog.
+        $this->clearPlatformPlans();
+
         $this->bind(AuthenticationManager::class, new AuthenticationManager());
         $this->bind(Request::class, Request::create('/'));
 

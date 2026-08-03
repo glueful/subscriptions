@@ -15,6 +15,11 @@ final class SubscriptionPlanRepositoryTest extends SubscriptionsTestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // This suite owns the catalog outright (it asserts on whole-table reads
+        // and reuses the 'pro' key), so drop the harness's platform seed.
+        $this->clearPlatformPlans();
+
         $this->repo = new SubscriptionPlanRepository();
     }
 
