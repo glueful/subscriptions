@@ -53,10 +53,10 @@ use Psr\Log\LoggerInterface;
 final class SubscriptionEventProjector implements SubscriptionEventProjectorInterface
 {
     private const SETTLEABLE = ['trialing', 'past_due'];
-    // 'non_renewing' (design spec §4.3, Task 11) is added to the allowlist here in
-    // Task 10 ONLY so the status can round-trip through normalizedStatus() without
-    // being silently dropped -- the projector gains no new mapping/case for it yet
-    // (no driver emits it today); the full grace/entitlement semantics land in Task 11.
+    // 'non_renewing' (design spec §3.7/§4.3) round-trips through
+    // normalizedStatus() like any other known status; the projector's own
+    // mapping into it lives in cancellationChanges() below, driven by
+    // `subscription.canceled` events carrying `cancellation_mode=stop_renewal`.
     private const KNOWN_STATUSES = [
         'active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused', 'non_renewing',
     ];
@@ -617,10 +617,16 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                 ];
 
             case 'subscription.canceled':
-                return [
-                    'status' => 'canceled',
-                    'canceled_at' => $this->formatForDb(new \DateTimeImmutable('now')),
-                ];
+                // Mirrors subscription.created's own guard just above: a late/
+                // replayed/reconciliation cancellation event (distinct logical
+                // key) must never resurrect a terminal canceled row into
+                // entitling non_renewing (or re-touch it at all). Record/claim
+                // the event but project nothing.
+                if ($currentStatus === 'canceled') {
+                    return [];
+                }
+
+                return $this->cancellationChanges($sub, $normalized);
 
             case 'payment.succeeded':
             case 'invoice.paid':
@@ -645,20 +651,94 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     }
 
     /**
+     * `subscription.canceled` mapping (design spec §3.7/§4.3, Task 11):
+     * Paystack's disable stops future charges but the already-paid period runs
+     * to its `next_payment_date` -- normalized as `cancellation_mode` =
+     * 'stop_renewal' plus a provider period end. That combination projects
+     * `non_renewing`, KEEPING `current_period_end` so
+     * EffectivePlanResolver::resolve() can gate entitlement on it, rather than
+     * today's immediate `canceled`. `canceled_at` records the DISABLE moment
+     * (an audit fact), not the eventual loss of entitlement -- the resolver,
+     * not this timestamp, is what actually gates access on the boundary. The
+     * caller (computeChanges()) already refuses to call this at all once the
+     * row is terminally `canceled`, so the only way this method sees an
+     * already-set `canceled_at` is a redelivered/late cancellation event on a
+     * row that is still `non_renewing` -- that original disable moment is
+     * PRESERVED (never re-stamped) so a redelivery can't drift the audit
+     * timestamp forward.
+     *
+     * Every other case -- no mode, an explicit 'immediate' mode, or a
+     * stop_renewal event whose period end is missing/unparseable -- fails
+     * closed to the existing terminal `canceled` exactly as before. A
+     * `non_renewing` row is never projected without a boundary to resolve
+     * against.
+     *
+     * @param array<string,mixed> $sub
+     * @param array<string,mixed> $normalized
+     * @return array<string,mixed>
+     */
+    private function cancellationChanges(array $sub, array $normalized): array
+    {
+        $mode = $this->scalarOrNull($normalized['cancellation_mode'] ?? null);
+        $periodEnd = $this->parsePeriodEnd($normalized);
+        $canceledAtChange = $this->canceledAtChange($sub);
+
+        if ($mode === 'stop_renewal' && $periodEnd !== null) {
+            return $canceledAtChange + [
+                'status' => 'non_renewing',
+                'current_period_end' => $this->formatForDb($periodEnd),
+            ];
+        }
+
+        return $canceledAtChange + ['status' => 'canceled'];
+    }
+
+    /**
+     * `canceled_at` is stamped ONCE, at the first disable/cancellation event a
+     * row ever sees -- an already-set value (only reachable via a redelivered
+     * event on a still-`non_renewing` row; see cancellationChanges()) is left
+     * untouched by omitting the key entirely, rather than rewriting it to the
+     * same-meaning-but-wrong "now".
+     *
+     * @param array<string,mixed> $sub
+     * @return array<string,mixed>
+     */
+    private function canceledAtChange(array $sub): array
+    {
+        return $this->scalarOrNull($sub['canceled_at'] ?? null) !== null
+            ? []
+            : ['canceled_at' => $this->formatForDb(new \DateTimeImmutable('now'))];
+    }
+
+    /**
      * @param array<string,mixed> $normalized
      * @return array<string,mixed>
      */
     private function periodChanges(array $normalized): array
     {
+        $periodEnd = $this->parsePeriodEnd($normalized);
+
+        return $periodEnd !== null ? ['current_period_end' => $this->formatForDb($periodEnd)] : [];
+    }
+
+    /**
+     * Shared defensive parse of the provider's `current_period_end` (mirrors
+     * EffectivePlanResolver::withinGrace()'s shape): an absent, non-scalar, or
+     * unparseable value is simply "no period end", never a thrown error.
+     *
+     * @param array<string,mixed> $normalized
+     */
+    private function parsePeriodEnd(array $normalized): ?\DateTimeImmutable
+    {
         $value = $normalized['current_period_end'] ?? null;
         if (!is_scalar($value) || (string) $value === '') {
-            return [];
+            return null;
         }
 
         try {
-            return ['current_period_end' => $this->formatForDb(new \DateTimeImmutable((string) $value))];
+            return new \DateTimeImmutable((string) $value);
         } catch (\Throwable) {
-            return [];
+            return null;
         }
     }
 

@@ -32,7 +32,14 @@ namespace Glueful\Extensions\Subscriptions\Projection;
  */
 final class ProviderEventData
 {
-    private const TOP_LEVEL_ALLOW = ['gateway_subscription_id', 'status', 'current_period_end', 'metadata'];
+    // 'cancellation_mode' (design spec §3.7/§4.3, Task 11): Paystack's normalized
+    // disable event carries this alongside `current_period_end` so a receipt
+    // (and the historical subscription_events row) can be diagnosed after the
+    // fact -- e.g. distinguishing a `stop_renewal` disable that was fed a
+    // missing/invalid period end (and so fell closed to `canceled`) from an
+    // ordinary immediate cancellation.
+    private const TOP_LEVEL_ALLOW =
+        ['gateway_subscription_id', 'status', 'current_period_end', 'cancellation_mode', 'metadata'];
     private const METADATA_ALLOW = ['tenant_uuid', 'subject_type', 'subject_uuid', 'plan_uuid', 'glueful_consumer'];
 
     private const SECRET_KEY_PATTERN =

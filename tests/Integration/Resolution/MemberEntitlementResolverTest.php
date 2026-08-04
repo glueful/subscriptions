@@ -187,6 +187,42 @@ final class MemberEntitlementResolverTest extends SubscriptionsTestCase
         );
     }
 
+    /**
+     * Task 11 (design spec §3.7/§4.3): the member entitlement path grants
+     * `non_renewing`'s plan only while `current_period_end` is still in the
+     * future -- same rule as the tenant path (EntitlementResolverTest), wired
+     * through MemberEntitlementResolver's own workspace-scoped catalog.
+     */
+    public function testNonRenewingMembershipBeforeBoundaryKeepsPlanEntitlements(): void
+    {
+        $this->seedWorkspacePlan('member-pro', ['content.premium' => true]);
+        $this->seedMembership([
+            'plan_key' => 'member-pro',
+            'status' => 'non_renewing',
+            'current_period_end' => (new \DateTimeImmutable('+1 hour'))->format('Y-m-d H:i:s'),
+        ]);
+
+        self::assertSame(
+            ['content.premium' => true],
+            $this->resolver()->resolveMap($this->appContext(), self::TENANT, self::USER)
+        );
+    }
+
+    public function testNonRenewingMembershipAfterBoundaryResolvesEmptyBaseMap(): void
+    {
+        $this->seedWorkspacePlan('member-pro', ['content.premium' => true]);
+        $this->seedMembership([
+            'plan_key' => 'member-pro',
+            'status' => 'non_renewing',
+            'current_period_end' => (new \DateTimeImmutable('-1 hour'))->format('Y-m-d H:i:s'),
+        ]);
+
+        self::assertSame(
+            [],
+            $this->resolver()->resolveMap($this->appContext(), self::TENANT, self::USER)
+        );
+    }
+
     public function testMembershipPlusOverrideMergesWithOverrideWinning(): void
     {
         $this->seedWorkspacePlan('member-pro', ['content.premium' => false, 'projects.limit' => 10]);
