@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration;
 
 use Glueful\Extensions\Subscriptions\Plans\PlanManagementService;
 use Glueful\Extensions\Subscriptions\Plans\PlanPayloadValidator;
+use Glueful\Extensions\Subscriptions\Plans\PlanPurchasability;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Tests\Support\CapturingLogger;
 use Glueful\Extensions\Subscriptions\Tests\Support\SubscriptionsTestCase;
@@ -184,6 +185,145 @@ final class PlanManagementServiceTest extends SubscriptionsTestCase
         self::assertSame('archived', $logger->records[0]['context']['action']);
         self::assertSame('active', $logger->records[0]['context']['before']['status']);
         self::assertSame('archived', $logger->records[0]['context']['after']['status']);
+    }
+
+    // ---------------------------------------------------------------
+    // provider_identifiers (design spec §4.2, Task 13)
+    // ---------------------------------------------------------------
+
+    public function testCreatePersistsProviderIdentifiersMap(): void
+    {
+        $row = $this->service->create(array_merge($this->payload('team'), [
+            'provider_identifiers' => ['stripe' => 'price_team_stripe', 'paystack' => 'PLN_team'],
+        ]));
+
+        self::assertSame(
+            ['stripe' => 'price_team_stripe', 'paystack' => 'PLN_team'],
+            $row['provider_identifiers']
+        );
+
+        $stored = $this->connection()->table('subscription_plans')->where('plan_key', 'team')->first();
+        self::assertSame(
+            ['stripe' => 'price_team_stripe', 'paystack' => 'PLN_team'],
+            json_decode((string) $stored['provider_identifiers'], true, flags: JSON_THROW_ON_ERROR)
+        );
+    }
+
+    public function testCreateWithoutProviderIdentifiersDefaultsToEmptyMap(): void
+    {
+        $row = $this->service->create($this->payload('team'));
+
+        self::assertSame([], $row['provider_identifiers']);
+    }
+
+    public function testCreateRejectsInvalidProviderIdentifiersMap(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->service->create(array_merge($this->payload('team'), [
+            'provider_identifiers' => ['Stripe Live' => 'price_123'],
+        ]));
+    }
+
+    public function testPatchUpdatesProviderIdentifiersMap(): void
+    {
+        $this->service->create($this->payload('team'));
+
+        $row = $this->service->update('team', [
+            'provider_identifiers' => ['stripe' => 'price_team_v2'],
+        ]);
+
+        self::assertSame(['stripe' => 'price_team_v2'], $row['provider_identifiers']);
+    }
+
+    public function testPatchRejectsInvalidProviderIdentifiersMap(): void
+    {
+        $this->service->create($this->payload('team'));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->service->update('team', [
+            'provider_identifiers' => ['stripe' => ''],
+        ]);
+    }
+
+    /**
+     * PINS the documented PATCH semantics (README "Per-gateway purchasability",
+     * design spec §4.2 review): `provider_identifiers` is a FULL-MAP REPLACEMENT
+     * on PATCH, never a merge -- exactly like `entitlements` on the same
+     * endpoint. PATCHing a paystack-only map onto a plan that already has a
+     * stripe identifier silently drops stripe, and `PlanPurchasability`
+     * immediately reflects that loss for the stripe gateway.
+     */
+    public function testPatchReplacesTheWholeProviderIdentifiersMapRatherThanMerging(): void
+    {
+        $this->service->create(array_merge($this->payload('team'), [
+            'provider_identifiers' => ['stripe' => 'price_team_stripe', 'paystack' => 'PLN_team'],
+        ]));
+        self::assertNotEmpty(PlanPurchasability::forGateway($this->appContext(), 'stripe'));
+
+        $row = $this->service->update('team', [
+            'provider_identifiers' => ['paystack' => 'PLN_team_v2'],
+        ]);
+
+        self::assertSame(['paystack' => 'PLN_team_v2'], $row['provider_identifiers']);
+        self::assertArrayNotHasKey('stripe', $row['provider_identifiers']);
+        self::assertSame(
+            [],
+            PlanPurchasability::forGateway($this->appContext(), 'stripe'),
+            'stripe identifier must be gone after a paystack-only PATCH replaced the whole map'
+        );
+        self::assertNotEmpty(
+            PlanPurchasability::forGateway($this->appContext(), 'paystack'),
+            'paystack identifier from the PATCH must still be purchasable'
+        );
+    }
+
+    /**
+     * The explicit-clear path (design spec §4.2 review): PATCHing
+     * `provider_identifiers` to `null` clears the map entirely, making the plan
+     * unpurchasable on every gateway it previously carried an identifier for.
+     */
+    public function testPatchWithNullClearsTheProviderIdentifiersMap(): void
+    {
+        $this->service->create(array_merge($this->payload('team'), [
+            'provider_identifiers' => ['stripe' => 'price_team_stripe', 'paystack' => 'PLN_team'],
+        ]));
+
+        $row = $this->service->update('team', ['provider_identifiers' => null]);
+
+        self::assertSame([], $row['provider_identifiers']);
+        self::assertSame([], PlanPurchasability::forGateway($this->appContext(), 'stripe'));
+        self::assertSame([], PlanPurchasability::forGateway($this->appContext(), 'paystack'));
+    }
+
+    /**
+     * Same explicit-clear guarantee via an empty object/map instead of `null`
+     * (design spec §4.2 review) -- both spellings of "no identifiers" must
+     * behave identically.
+     */
+    public function testPatchWithEmptyMapClearsTheProviderIdentifiersMap(): void
+    {
+        $this->service->create(array_merge($this->payload('team'), [
+            'provider_identifiers' => ['stripe' => 'price_team_stripe', 'paystack' => 'PLN_team'],
+        ]));
+
+        $row = $this->service->update('team', ['provider_identifiers' => []]);
+
+        self::assertSame([], $row['provider_identifiers']);
+        self::assertSame([], PlanPurchasability::forGateway($this->appContext(), 'stripe'));
+        self::assertSame([], PlanPurchasability::forGateway($this->appContext(), 'paystack'));
+    }
+
+    public function testImportConfigPassesThroughProviderIdentifiers(): void
+    {
+        $this->setConfig('subscriptions.plans.pro.provider_identifiers', ['stripe' => 'price_pro_stripe']);
+
+        $this->service->importConfig(force: false);
+
+        self::assertSame(
+            ['stripe' => 'price_pro_stripe'],
+            $this->service->find('pro')['provider_identifiers']
+        );
     }
 
     public function testMissingLoggerDoesNotFail(): void

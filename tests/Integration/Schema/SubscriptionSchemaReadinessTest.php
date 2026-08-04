@@ -120,6 +120,22 @@ final class SubscriptionSchemaReadinessTest extends SubscriptionsTestCase
         self::assertFalse($readiness->isReady());
     }
 
+    /**
+     * Task 13 (design spec §4.2): migration 008's
+     * `subscription_plans.provider_identifiers` is part of the minimum 2.x runtime
+     * shape this class checks -- a database that ran 001-007 but not 008 is a
+     * partial/downgraded install, not a legitimate 2.1 one, and must resolve to
+     * NOT ready exactly like a missing subject-model column does.
+     */
+    public function testNotReadyWhenPlansProviderIdentifiersColumnIsMissing(): void
+    {
+        $this->dropColumn('subscription_plans', 'provider_identifiers');
+
+        $readiness = new SubscriptionSchemaReadiness($this->appContext());
+
+        self::assertFalse($readiness->isReady());
+    }
+
     public function testNotReadyWhenAConsumedReceiptColumnIsMissing(): void
     {
         $this->dropColumn('subscription_provider_event_receipts', 'candidate_subject_uuid');

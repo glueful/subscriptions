@@ -342,6 +342,47 @@ Every transition appends a `subscription_events` row (`created`,
 `from_status` / `to_status` / `source` (`manual`, `provider_event`,
 `reconcile`).
 
+## Per-gateway purchasability
+
+Since 2.2 (design spec §4.2), `subscription_plans.provider_identifiers`
+(migration `008`) is a closed `{gateway_key: identifier}` JSON map -- keys
+`/^[a-z0-9_-]{1,50}$/`, identifiers non-empty strings ≤191 chars, validated
+on every plan write path (`create`/`update`/`import-config`). This map is
+**the ONE declared authority for checkout purchasability**. The typed
+projection is the host contract -- Thallo (and any other host) consumes it
+only, never raw plan columns:
+
+```php
+use Glueful\Extensions\Subscriptions\Plans\PlanPurchasability;
+
+$purchasable = PlanPurchasability::forGateway($context, 'stripe');
+// list<array{plan_uuid: string, plan_key: string, name: string, provider_identifier: string}>
+```
+
+Returns platform-scope (`audience='tenant'`) plans with `status='active'`
+AND an identifier configured for the requested gateway -- `draft`/`archived`
+plans never appear here even if they carry one.
+
+> **The pre-existing scalar `provider_price_id` is compatibility-only**
+> (webhook correlation for pre-existing provider-managed rows) **and is
+> NEVER read for purchasability.** A plan configured with only the scalar is
+> NOT purchasable through this projection. There is **no automatic
+> migration** of the scalar into the map on upgrade -- every existing plan's
+> `provider_identifiers` stays empty, and it becomes purchasable for a
+> gateway only once an operator explicitly configures an identifier (via
+> `PATCH /subscriptions/plans/{key}`, see [Managed plan
+> API](#managed-plan-api)).
+
+> **`PATCH`ing `provider_identifiers` is a FULL-MAP REPLACEMENT, never a
+> merge** -- exactly like `entitlements` on the same endpoint. Sending
+> `{"paystack": "PLN_x"}` for a plan that already has a `stripe` identifier
+> configured **replaces the whole map**, silently dropping `stripe`: the
+> caller must always send the complete desired map, not just the key(s) it
+> wants to change. Sending `{"provider_identifiers": null}` or `{}` clears
+> the map entirely (the plan becomes unpurchasable on every gateway until an
+> identifier is configured again); this is a supported way to intentionally
+> de-list a plan from checkout without archiving it.
+
 ## Bulk administrative reads
 
 `SubscriptionService::currentForTenants(array $tenantUuids): array` is a
@@ -531,6 +572,12 @@ POST   /subscriptions/plans/{key}/archive
 `{key}` accepts lowercase letters, numbers, dot, underscore, and hyphen. The
 reserved key `import-config` is rejected for plans so the collection import
 route cannot collide with a plan key.
+
+Since 2.2, `POST`/`PATCH` also accept `provider_identifiers` -- the
+per-gateway purchasability map (see [Per-gateway
+purchasability](#per-gateway-purchasability)); an invalid key or value
+surfaces through the same upstream validation the rest of the payload
+already uses, i.e. a 422 from the platform API.
 
 ## CLI
 

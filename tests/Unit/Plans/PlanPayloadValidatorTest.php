@@ -259,4 +259,143 @@ final class PlanPayloadValidatorTest extends TestCase
         self::assertSame('price1234567', $validated['provider_price_id']);
         self::assertSame('active', $validated['status']);
     }
+
+    // ---------------------------------------------------------------
+    // provider_identifiers (design spec §4.2, Task 13)
+    // ---------------------------------------------------------------
+
+    public function testCreateNormalizesMissingProviderIdentifiersToEmptyMap(): void
+    {
+        $payload = $this->validPayload();
+        unset($payload['provider_identifiers']);
+
+        $validated = $this->validator->validateCreate($payload);
+
+        self::assertSame([], $validated['provider_identifiers']);
+    }
+
+    public function testCreateNormalizesNullProviderIdentifiersToEmptyMap(): void
+    {
+        $validated = $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'provider_identifiers' => null,
+        ]));
+
+        self::assertSame([], $validated['provider_identifiers']);
+    }
+
+    public function testCreateAcceptsAValidProviderIdentifiersMap(): void
+    {
+        $validated = $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'provider_identifiers' => ['stripe' => 'price_123', 'paystack' => 'PLN_abc'],
+        ]));
+
+        self::assertSame(
+            ['stripe' => 'price_123', 'paystack' => 'PLN_abc'],
+            $validated['provider_identifiers']
+        );
+    }
+
+    public function testCreateRejectsNonArrayProviderIdentifiers(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'provider_identifiers' => 'stripe',
+        ]));
+    }
+
+    /**
+     * @dataProvider invalidProviderIdentifierKeys
+     */
+    public function testCreateRejectsInvalidProviderIdentifierKeys(string $key): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'provider_identifiers' => [$key => 'price_123'],
+        ]));
+    }
+
+    /** @return iterable<string,array{string}> */
+    public static function invalidProviderIdentifierKeys(): iterable
+    {
+        yield 'uppercase' => ['Stripe'];
+        yield 'space' => ['stripe live'];
+        yield 'dot' => ['stripe.live'];
+        yield 'empty' => [''];
+        yield 'too long' => [str_repeat('a', 51)];
+    }
+
+    /**
+     * @dataProvider invalidProviderIdentifierValues
+     */
+    public function testCreateRejectsInvalidProviderIdentifierValues(mixed $value): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'provider_identifiers' => ['stripe' => $value],
+        ]));
+    }
+
+    /** @return iterable<string,array{mixed}> */
+    public static function invalidProviderIdentifierValues(): iterable
+    {
+        yield 'empty string' => [''];
+        yield 'int' => [123];
+        yield 'bool' => [true];
+        yield 'null' => [null];
+        yield 'array' => [['nested' => true]];
+        yield 'too long' => [str_repeat('a', 192)];
+    }
+
+    public function testCreateAcceptsProviderIdentifierValueOf191Characters(): void
+    {
+        $validated = $this->validator->validateCreate(array_merge($this->validPayload(), [
+            'provider_identifiers' => ['stripe' => str_repeat('a', 191)],
+        ]));
+
+        self::assertSame(str_repeat('a', 191), $validated['provider_identifiers']['stripe']);
+    }
+
+    public function testPatchAcceptsAValidProviderIdentifiersMap(): void
+    {
+        $validated = $this->validator->validatePatch(
+            ['provider_identifiers' => ['stripe' => 'price_123']],
+            $this->validPayload()
+        );
+
+        self::assertSame(['stripe' => 'price_123'], $validated['provider_identifiers']);
+    }
+
+    public function testPatchRejectsInvalidProviderIdentifiersMap(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->validator->validatePatch(
+            ['provider_identifiers' => ['stripe' => '']],
+            $this->validPayload()
+        );
+    }
+
+    public function testPatchOmittedProviderIdentifiersLeavesFieldUnset(): void
+    {
+        $validated = $this->validator->validatePatch(
+            ['display_name' => 'Renamed'],
+            $this->validPayload()
+        );
+
+        self::assertArrayNotHasKey('provider_identifiers', $validated);
+    }
+
+    public function testValidateImportConfigPlanPassesThroughProviderIdentifiers(): void
+    {
+        $validated = $this->validator->validateImportConfigPlan('starter', [
+            'name' => 'Starter',
+            'entitlements' => ['projects.limit' => 3],
+            'provider_identifiers' => ['stripe' => 'price_starter'],
+        ], 'active');
+
+        self::assertSame(['stripe' => 'price_starter'], $validated['provider_identifiers']);
+    }
 }

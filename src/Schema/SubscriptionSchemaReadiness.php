@@ -49,7 +49,11 @@ final class SubscriptionSchemaReadiness
         'subscriptions' => ['subject_type', 'subject_uuid', 'plan_uuid', 'checkout_origination_uuid'],
         'subscription_overrides' => ['subject_type', 'subject_uuid'],
         'subscription_events' => ['subject_type', 'subject_uuid'],
-        'subscription_plans' => ['audience', 'owner_tenant_uuid'],
+        // 'provider_identifiers' is migration 008 (design spec §4.2, Task 13): the
+        // per-gateway checkout-purchasability map. Same reasoning as
+        // checkout_origination_uuid above -- a database that ran 001-007 but not
+        // 008 is a partial/downgraded 2.x install, not a legitimate 2.1 one.
+        'subscription_plans' => ['audience', 'owner_tenant_uuid', 'provider_identifiers'],
         'subscription_provider_event_receipts' => [
             'uuid',
             'provider_gateway',

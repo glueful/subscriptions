@@ -142,6 +142,12 @@ final class PrepareV2Command extends BaseCommand
             }
 
             $payload = $validator->validateImportConfigPlan($planKey, $configPlan, 'active');
+            // provider_identifiers (migration 008, design spec §4.2) does not exist on
+            // this pre-006 schema either -- same reasoning as this class's own docblock
+            // for audience/owner_tenant_uuid. The validator always returns the key
+            // (normalized to [] when absent from config), so it must be stripped before
+            // this frozen 1.x-shaped insert, not merely left unset in config.
+            unset($payload['provider_identifiers']);
 
             if ($plans->findByKeyUnscoped($context, $planKey) !== null) {
                 continue;

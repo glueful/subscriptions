@@ -211,6 +211,10 @@ final class SubscriptionPlanRepository
             $row['entitlements'] = json_encode($row['entitlements'], JSON_THROW_ON_ERROR);
         }
 
+        if (array_key_exists('provider_identifiers', $row) && is_array($row['provider_identifiers'])) {
+            $row['provider_identifiers'] = json_encode($row['provider_identifiers'], JSON_THROW_ON_ERROR);
+        }
+
         return $row;
     }
 
@@ -223,6 +227,19 @@ final class SubscriptionPlanRepository
         if (isset($row['entitlements']) && is_string($row['entitlements'])) {
             $decoded = json_decode($row['entitlements'], true, flags: JSON_THROW_ON_ERROR);
             $row['entitlements'] = is_array($decoded) ? $decoded : [];
+        }
+
+        // provider_identifiers (design spec §4.2, Task 13) is nullable: a NULL
+        // column value decodes to [] -- "no identifiers configured" -- rather
+        // than staying NULL, so every consumer (PlanPurchasability included)
+        // can treat the field as a plain map without a null check.
+        if (array_key_exists('provider_identifiers', $row)) {
+            if (is_string($row['provider_identifiers'])) {
+                $decoded = json_decode($row['provider_identifiers'], true, flags: JSON_THROW_ON_ERROR);
+                $row['provider_identifiers'] = is_array($decoded) ? $decoded : [];
+            } elseif ($row['provider_identifiers'] === null) {
+                $row['provider_identifiers'] = [];
+            }
         }
 
         return $row;
