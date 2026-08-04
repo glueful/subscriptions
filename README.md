@@ -146,12 +146,27 @@ entitlement map is built:
 | `past_due`, grace passed or absent        | `default_plan`       |
 | `incomplete`                              | `default_plan`       |
 | `paused`                                  | `default_plan`       |
+| `non_renewing`, `current_period_end` in the future | the subscription's |
+| `non_renewing`, period end passed/absent  | `default_plan`       |
 | `canceled`                                | `default_plan`       |
 
 `paused` is accepted from payvia's provider-status vocabulary (via
 `subscription.updated` projection or reconcile drift) and resolves to the
 default plan: a paused tenant is treated as not entitled to paid features until
 the provider resumes the subscription.
+
+`non_renewing` (since 2.2, design spec §3.7/§4.3) is a genuine
+**boundary-entitling** state, not a terminal one: Paystack's `stop_renewal`
+disable stops future charges but the already-paid period still runs to its
+end, so the subscription keeps resolving its own plan only while
+`current_period_end` is still in the future; an absent, unparseable, or
+already-passed period end fails closed to `default_plan`. It is never
+resurrected -- a late or replayed `subscription.created`/`subscription.canceled`
+event can never re-touch a row that already reached terminal `canceled`, and
+`reserveCheckoutFor()` (see [Checkout
+reservations](#checkout-reservations-self-serve-checkout-seam) below) treats
+an unexpired `non_renewing` row as entitling for its `already_subscribed`
+guard, exactly like `active`/`trialing`/`past_due`.
 
 ## Route middleware
 
@@ -342,6 +357,76 @@ Every transition appends a `subscription_events` row (`created`,
 `from_status` / `to_status` / `source` (`manual`, `provider_event`,
 `reconcile`).
 
+## Checkout reservations (self-serve checkout seam)
+
+Since 2.2 (design spec §4.1), `SubscriptionEventProjector` only ever
+**relinks an EXISTING local row** when a provider `subscription.created`
+webhook arrives -- it never creates one. Self-serve checkout must therefore
+reserve that row itself, BEFORE any provider I/O, inside its own local
+preparation transaction:
+
+```php
+use Glueful\Extensions\Subscriptions\CheckoutReservationException;
+use Glueful\Extensions\Subscriptions\Subject;
+
+$reservation = $service->reserveCheckoutFor(
+    Subject::tenant($tenantUuid),
+    $planUuid,
+    $originationUuid,          // Payvia's opaque checkout correlation id
+    ['actor' => $currentUserUuid],   // optional; audit-stamped only
+);
+```
+
+This is the full host contract:
+
+- Creates (or idempotently returns, for the same origination + plan) a
+  `status = 'incomplete'` subscription row: **non-entitling** (the
+  entitlement resolver treats `incomplete` as no entitlements), no provider
+  fields set, `plan_uuid` and the opaque `origination_uuid` recorded. The
+  origination is local correlation state only -- never a provider
+  authority.
+- Throws `CheckoutReservationException` with code `already_subscribed` when
+  the subject already has an entitling subscription (`active`, `trialing`,
+  `past_due`, or an unexpired `non_renewing` row -- see [Status
+  gating](#status-gating)). An expired `non_renewing` row is non-entitling
+  and may be replaced by a fresh reservation.
+- Throws `CheckoutReservationException` with code
+  `checkout_reservation_replace_refused` when an existing `incomplete`
+  reservation differs by origination or plan and `$opts['replace']` was not
+  passed as `true`. **A direct/ad-hoc replace is never allowed** -- only a
+  checkout continuation that has already won the database's live guard for
+  the NEW origination may pass `replace: true`, which is what stops two
+  concurrent plan requests from leaving the reservation on the losing plan.
+- Never entitles, never activates. Activation authority stays exactly where
+  it already was: the existing `subscription.created` projection finds the
+  incomplete row, relinks the provider ids, and now additionally verifies
+  the webhook's `metadata.origination_uuid` matches the bound reservation --
+  a mismatched, late, or historical origination is rejected as
+  `origination_mismatch` (see [Consumes
+  Payvia](#consumes-payvia-when-installed)) and never overwrites the
+  reservation.
+
+```php
+$released = $service->releaseCheckoutReservation(Subject::tenant($tenantUuid), $originationUuid);
+```
+
+Cleanup for an origination that reached a terminal, non-dispatched state
+(failed/expired/abandoned, or an operator resolution): a pure
+compare-and-delete guarded by the exact origination, `status = 'incomplete'`,
+and no provider field present. **The `bool` return is deliberately
+overloaded** -- `false` means EITHER "no such reservation" (already
+released, wrong origination, no row at all) OR "refused: the row already
+carries provider fields" (the projector has since settled it -- releasing
+it now would delete a real subscription). This method does not distinguish
+the two itself (that would need a second, TOCTOU-prone read outside the
+compare-and-delete), so a caller that needs to react differently must
+branch on THIS call's boolean result, never re-query state before/after to
+infer which `false` case occurred.
+
+Migration `007` adds `subscriptions.checkout_origination_uuid` (nullable,
+indexed for diagnostics); every pre-existing row stays `NULL` and provider
+projection never infers an origination for a row that predates the column.
+
 ## Per-gateway purchasability
 
 Since 2.2 (design spec §4.2), `subscription_plans.provider_identifiers`
@@ -526,7 +611,7 @@ Provider-event projection maps:
 | `subscription.created`  | link provider sub, status `active`/`trialing`         |
 | `subscription.updated`  | status/period drift; settling to active clears grace  |
 | `subscription.past_due` | status `past_due`, `grace_ends_at = now + grace_days` |
-| `subscription.canceled` | status `canceled`, `canceled_at`                      |
+| `subscription.canceled` | status `canceled`, `canceled_at` -- or, since 2.2, `non_renewing` (period end preserved) when `cancellation_mode=stop_renewal` carries a provider period end (see [Status gating](#status-gating)) |
 | `payment.succeeded`    | if `trialing`/`past_due` -> `active`, clear grace     |
 | `invoice.paid`          | same settle path                                      |
 
@@ -549,10 +634,38 @@ memberships](#provider-driven-memberships) above for the full
 > "redeliver this event"); catching it and still returning 2xx silently
 > discards the event, since nothing durable remembers the delivery happened.
 > Every OTHER deterministic rejection (`missing_subject`, `invalid_subject`,
-> `plan_scope_mismatch`, `subject_mismatch`) instead commits a `rejected`
-> receipt and will fail identically on every retry -- see
+> `plan_scope_mismatch`, `subject_mismatch`, and -- since 2.2 --
+> `origination_mismatch`) instead commits a `rejected` receipt and will fail
+> identically on every retry -- see
 > [docs/BRING_YOUR_OWN_PROVIDER.md](docs/BRING_YOUR_OWN_PROVIDER.md#receipts-and-rejection-semantics)
 > for the complete table.
+
+### Payvia acknowledgement bridge (strict lane, payvia `^2.5`)
+
+When payvia's optional strict payment-event lane is enabled,
+`StrictPayviaSubscriptionEventBridge` (tagged with payvia's
+`StrictPaymentEventListener::CONTAINER_TAG`) replaces the ordinary bus
+listener. It projects through the SAME `SubscriptionEventProjector` rules as
+always, via the additive `projectWithOutcome()` entry point (design spec
+§4.3), then -- for `subscription.created` **only**, and only when the event
+actually correlates to a Payvia checkout (its metadata carries an
+`origination_uuid`) -- acknowledges the settled outcome through payvia's
+`SubscriptionProjectionAcknowledger` contract, strictly AFTER the receipt
+transaction has committed. Scoped to `subscription.created` deliberately:
+payvia's own origination finalizer is itself scoped to that one event, so a
+later event for the same subscription is never acknowledged against an
+origination that has already settled.
+
+This is a soft dependency on top of a soft dependency: `interface_exists()`
+gates the whole attempt, so payvia `>=2.4` but `<2.5` (no
+`SubscriptionProjectionAcknowledger` contract yet) is a silent no-op, not a
+failure. Once the contract IS present, a missing/unresolvable container
+binding is a hard, uncaught failure (fail closed, event retryable) rather
+than a silently stuck checkout origination. Nothing here changes who
+decides subject resolution, scope/plan-audience validation, or rejection
+codes -- the projector remains the sole authority for all of that; this
+bridge only decides whether an event reaches it at all and whether a
+settled `subscription.created` outcome gets acknowledged back to payvia.
 
 ## Managed plan API
 
