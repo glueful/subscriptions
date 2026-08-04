@@ -80,6 +80,19 @@ final class EntitlementResolverTest extends SubscriptionsTestCase
         self::assertSame(self::FREE, $this->resolver()->resolveMap($this->appContext(), 'ghost'));
     }
 
+    /**
+     * Task 10 (design spec §4.1): an `incomplete` row -- the shape
+     * `SubscriptionService::reserveCheckoutFor()` creates -- is NON-ENTITLING. It
+     * must resolve identically to `canceled`/no-subscription, never to the plan it
+     * is reserved against, even though `plan_key` on the row is already 'pro'.
+     */
+    public function testIncompleteProReservationDowngradesToDefaultEntitlements(): void
+    {
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'pro', 'status' => 'incomplete']);
+
+        self::assertSame(self::FREE, $this->resolver()->resolveMap($this->appContext(), 'tenantA'));
+    }
+
     public function testActiveOverrideWinsPerKeyAndExpiredOverrideIsIgnored(): void
     {
         $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'pro', 'status' => 'active']);

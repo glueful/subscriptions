@@ -118,6 +118,40 @@ class SubscriptionRepository
             ->update($this->normalizeJson($changes));
     }
 
+    /**
+     * Compare-and-delete guard for `SubscriptionService::releaseCheckoutReservation()`
+     * (design spec §4.1): deletes the row identified by the exact subject triple ONLY
+     * when it is STILL the exact reservation being released -- `status = 'incomplete'`,
+     * the SAME `checkout_origination_uuid`, and NONE of the four provider fields
+     * `reservationChanges()` nulls out (`provider_gateway`, `provider_customer_id`,
+     * `provider_subscription_id`, `provider_price_id`) has been written yet. A caller
+     * releasing a stale/mismatched origination, or one the projector has since
+     * activated (any `provider_*` field present), matches zero rows.
+     *
+     * Returns the affected row count so the caller can distinguish "nothing to
+     * release" from "refused: the row is settled" -- both are zero here, but the
+     * distinction matters one level up (see `SubscriptionService::
+     * releaseCheckoutReservation()`'s own docblock for why a bare void return isn't
+     * enough for Payvia's reconciliation continuation or Thallo's abandon flow).
+     */
+    public function deleteIncompleteReservation(
+        ApplicationContext $context,
+        Subject $subject,
+        string $originationUuid,
+    ): int {
+        return db($context)->table('subscriptions')
+            ->where('tenant_uuid', '=', $subject->tenantUuid)
+            ->where('subject_type', '=', $subject->type)
+            ->where('subject_uuid', '=', $subject->uuid)
+            ->where('status', '=', 'incomplete')
+            ->where('checkout_origination_uuid', '=', $originationUuid)
+            ->whereNull('provider_gateway')
+            ->whereNull('provider_customer_id')
+            ->whereNull('provider_subscription_id')
+            ->whereNull('provider_price_id')
+            ->delete();
+    }
+
     /** @return list<array<string,mixed>> */
     public function allWithProvider(ApplicationContext $context): array
     {

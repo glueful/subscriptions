@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Subscriptions\Tests\Support;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Connection;
 use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
+use Glueful\Extensions\Subscriptions\Database\Migrations\CheckoutReservations;
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionEventsTable;
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionOverridesTable;
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionPlansTable;
@@ -26,7 +27,8 @@ use Psr\Container\ContainerInterface;
  * 006 is applied here while the tables are still empty -- the spec §3.3
  * fresh-install path, exempt from the preparation marker -- and the platform
  * plans are seeded BEFORE any subscription fixture so seedSubscription() can
- * resolve plan_key -> plan_uuid.
+ * resolve plan_key -> plan_uuid. 007 (Task 10, design spec §4.1) adds the
+ * additive `checkout_origination_uuid` column on top of that same shape.
  *
  * Tests that must see a 1.x-shaped database (the upgrade bridge and migration
  * 006 itself) extend LegacySchemaTestCase instead.
@@ -108,6 +110,7 @@ abstract class SubscriptionsTestCase extends TestCase
         (new CreateSubscriptionPlansTable())->up($schema);
         (new CreateV2PreparationState())->up($schema);
         (new SubjectModel())->up($schema);
+        (new CheckoutReservations())->up($schema);
     }
 
     /**

@@ -40,7 +40,13 @@ final class SubscriptionSchemaReadiness
      * @var array<string, list<string>>
      */
     private const REQUIRED_COLUMNS = [
-        'subscriptions' => ['subject_type', 'subject_uuid', 'plan_uuid'],
+        // 'checkout_origination_uuid' is migration 007 (design spec §4.1, Task 10):
+        // it is only meaningful for checkout-capable 2.2 hosts, but is still part of
+        // the minimum 2.x runtime shape this class checks -- a database that ran
+        // 001-006 but not 007 is a partial/downgraded 2.x install, not a legitimate
+        // 2.0/2.1 one, so it must resolve to NOT ready exactly like a missing
+        // subject-model column does.
+        'subscriptions' => ['subject_type', 'subject_uuid', 'plan_uuid', 'checkout_origination_uuid'],
         'subscription_overrides' => ['subject_type', 'subject_uuid'],
         'subscription_events' => ['subject_type', 'subject_uuid'],
         'subscription_plans' => ['audience', 'owner_tenant_uuid'],

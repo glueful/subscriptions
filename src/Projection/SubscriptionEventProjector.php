@@ -53,7 +53,13 @@ use Psr\Log\LoggerInterface;
 final class SubscriptionEventProjector implements SubscriptionEventProjectorInterface
 {
     private const SETTLEABLE = ['trialing', 'past_due'];
-    private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
+    // 'non_renewing' (design spec §4.3, Task 11) is added to the allowlist here in
+    // Task 10 ONLY so the status can round-trip through normalizedStatus() without
+    // being silently dropped -- the projector gains no new mapping/case for it yet
+    // (no driver emits it today); the full grace/entitlement semantics land in Task 11.
+    private const KNOWN_STATUSES = [
+        'active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused', 'non_renewing',
+    ];
 
     /**
      * Column bounds for every PROVIDER-SOURCED string this class writes (spec §8 --

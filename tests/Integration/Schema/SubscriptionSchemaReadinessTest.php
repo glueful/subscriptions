@@ -68,6 +68,24 @@ final class SubscriptionSchemaReadinessTest extends SubscriptionsTestCase
         self::assertFalse($readiness->isReady());
     }
 
+    /**
+     * Task 10 (design spec §4.1): migration 007's
+     * `subscriptions.checkout_origination_uuid` is part of the minimum 2.x runtime
+     * shape this class checks -- a database that ran 001-006 but not 007 is a
+     * partial/downgraded install, not a legitimate one, and must resolve to NOT
+     * ready exactly like a missing subject-model column does.
+     */
+    public function testNotReadyWhenCheckoutOriginationUuidColumnIsMissing(): void
+    {
+        $this->connection()->getSchemaBuilder()
+            ->dropIndex('subscriptions', 'idx_subscriptions_checkout_origination');
+        $this->dropColumn('subscriptions', 'checkout_origination_uuid');
+
+        $readiness = new SubscriptionSchemaReadiness($this->appContext());
+
+        self::assertFalse($readiness->isReady());
+    }
+
     public function testNotReadyWhenOverridesSubjectUuidColumnIsMissing(): void
     {
         // subject_uuid is part of uniq_override_subject_entitlement -- SQLite
