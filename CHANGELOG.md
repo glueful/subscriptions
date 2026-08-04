@@ -2,6 +2,104 @@
 
 All notable changes to `glueful/subscriptions` are documented here.
 
+## 2.2.0 -- 2026-08-04
+
+Four additive seams for the self-serve workspace checkout program (design
+spec `docs/internal/superpowers/specs/2026-08-03-workspace-checkout-design.md`
+§4). **No behavior changes for existing 2.0/2.1 callers** -- every prior
+API keeps its exact signature and semantics; every new column is nullable
+and every new status/outcome is additive to an existing vocabulary.
+
+### Added
+
+- **`SubscriptionService::reserveCheckoutFor(Subject $subject, string $planUuid, string $originationUuid, array $opts = []): array`**
+  (migration `007`, `subscriptions.checkout_origination_uuid`). The ONLY way
+  self-serve checkout may create a local `status = 'incomplete'` row for the
+  provider projector to later relink onto -- `SubscriptionEventProjector`
+  only relinks EXISTING rows, it never creates one. The row is
+  NON-ENTITLING (the entitlement resolver treats `incomplete` as no
+  entitlements), carries no provider fields, and is audit-stamped via
+  `$opts['actor']`. Idempotent for the same origination + plan; a different
+  origination/plan may replace an existing `incomplete` reservation only
+  with `$opts['replace'] = true`, from inside a checkout continuation that
+  has already won the database's live guard -- direct/ad-hoc replacement is
+  refused (`checkout_reservation_replace_refused`). Refuses
+  (`already_subscribed`) when the subject already has an entitling
+  subscription (active/trialing/past_due, or an unexpired `non_renewing`
+  row); an expired `non_renewing` row may be replaced. Never entitles,
+  never activates -- activation authority remains the existing
+  `subscription.created` webhook projection, which now also verifies the
+  event's `origination_uuid` matches the bound reservation (see
+  `origination_mismatch` below).
+- **`SubscriptionService::releaseCheckoutReservation(Subject $subject, string $originationUuid): bool`.**
+  Reservation cleanup for an origination that reached a terminal,
+  non-dispatched state: a compare-and-delete guarded by the exact
+  origination, `status = 'incomplete'`, and no provider field present.
+  `false` is deliberately overloaded (no such reservation, OR refused
+  because the row already carries provider fields) -- callers that need to
+  react differently must branch on the boolean, never re-query state to
+  infer which case occurred. See [Checkout
+  reservations](README.md#checkout-reservations-self-serve-checkout-seam).
+- **`non_renewing` joins the subscription status vocabulary** (design spec
+  §3.7/§4.3). Paystack's `stop_renewal` cancellation mode (a disable that
+  stops future charges but honors the already-paid period) now projects
+  `non_renewing` with `current_period_end` preserved, instead of the
+  previous immediate `canceled`. `EffectivePlanResolver` grants the
+  subscription's plan only while `current_period_end > now`; an
+  absent/invalid/past period end fails closed to the default plan. This is
+  a genuine boundary-entitling state, not a terminal one, but it is also
+  never resurrected: both `subscription.created` and `subscription.canceled`
+  refuse to re-touch a row that has already reached terminal `canceled`
+  (a late/replayed event is claimed/recorded but projects nothing), and
+  `reserveCheckoutFor()`'s `already_subscribed` guard treats an unexpired
+  `non_renewing` row as entitling. `canceled_at` is stamped once, at the
+  first disable event, and never re-stamped by a redelivery.
+- **`SubscriptionEventProjectorInterface::projectWithOutcome(): ProjectionOutcome`**
+  (design spec §4.3), additive alongside the existing void `project()`.
+  Outcomes are `accepted` or a deterministic `rejected(code)`
+  (`subject_mismatch`, `plan_scope_mismatch`, `origination_mismatch`,
+  `missing_subject`, `invalid_subject`); unmapped/transient failures still
+  throw uncaught. A duplicate logical key returns the already-stored
+  receipt's outcome rather than an ambiguous no-op --
+  `ProviderEventReceiptRepository::findOutcomeByLogicalKey()` is the new
+  exact-key read both the early-duplicate path and a unique-insert-race
+  re-read go through, so neither can drift from what actually settled.
+  `origination_uuid` joins `ProviderEventData`'s safe opaque allowlist.
+  `StrictPayviaSubscriptionEventBridge` (the opt-in strict payvia lane) uses
+  this to write payvia's `SubscriptionProjectionAcknowledger` acknowledgement
+  (payvia `^2.5`) AFTER the receipt transaction commits -- scoped to
+  `subscription.created` ONLY, matching payvia's own
+  `finalizeOrigination()` scope, so a later event for the same subscription
+  is never acknowledged against an origination that has already settled.
+  A missing acknowledger binding is a hard, uncaught failure (fail closed,
+  event retryable); payvia `<2.5` (no `SubscriptionProjectionAcknowledger`
+  contract) is a silent no-op. `subscription.created`'s new
+  `origination_mismatch` rejection fires when a reserved row's
+  `checkout_origination_uuid` disagrees with the event's own
+  `origination_uuid` metadata -- a mismatched/late/historical origination
+  never overwrites the reservation. See [Consumes
+  Payvia](README.md#consumes-payvia-when-installed).
+- **`PlanPurchasability::forGateway(ApplicationContext $context, string $gateway): array`**
+  (migration `008`, `subscription_plans.provider_identifiers`, design spec
+  §4.2). The ONE declared authority for checkout purchasability: a closed
+  `{gateway_key: identifier}` JSON map, validated on every plan write path
+  (create/update/import-config) -- keys `/^[a-z0-9_-]{1,50}$/`, identifiers
+  non-empty strings ≤191 chars. Returns
+  `list<array{plan_uuid, plan_key, name, provider_identifier}>` for
+  platform-scope (`audience='tenant'`), `status='active'` plans carrying an
+  identifier for the requested gateway. **The pre-existing scalar
+  `provider_price_id` remains compatibility-only** (webhook correlation for
+  pre-existing provider-managed rows) **and is never read for
+  purchasability** -- a plan configured with only the scalar is not
+  purchasable through this projection. There is **no automatic migration**
+  of the scalar into the map: every pre-existing plan's
+  `provider_identifiers` stays `NULL`/empty after upgrading, and becomes
+  purchasable for a gateway only once an operator explicitly configures it.
+  **`PATCH`ing `provider_identifiers` is a full-map replacement, not a
+  merge** (same as `entitlements`) -- sending `null` or `{}` explicitly
+  clears the map. See [Per-gateway
+  purchasability](README.md#per-gateway-purchasability).
+
 ## 2.1.0 -- 2026-08-03
 
 Four additive host-integration seams for platform-authority callers (an

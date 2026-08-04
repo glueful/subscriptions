@@ -6,12 +6,18 @@ namespace Glueful\Extensions\Subscriptions\Tests\Integration\Bridge;
 
 use Glueful\Extensions\Subscriptions\Bridge\PayviaSubscriptionEventBridge;
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
+use Glueful\Extensions\Subscriptions\Projection\ProjectionOutcome;
 use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
 use PHPUnit\Framework\TestCase;
 
 /**
  * A spy projector that records the DTOs it receives. (Constructor property
  * promotion cannot be by-reference, so the spy holds its own public state.)
+ *
+ * Both entry points record into the SAME `$captured` list (Task 12): the strict
+ * bridge's parity test drives one call through project() (via the ordinary bus's
+ * __invoke()) and one through projectWithOutcome() (via handle()) and compares
+ * them, so a spy that only tracked one method would silently break that proof.
  */
 final class SpyProjector implements SubscriptionEventProjectorInterface
 {
@@ -21,6 +27,13 @@ final class SpyProjector implements SubscriptionEventProjectorInterface
     public function project(ProviderSubscriptionEvent $event): void
     {
         $this->captured[] = $event;
+    }
+
+    public function projectWithOutcome(ProviderSubscriptionEvent $event): ProjectionOutcome
+    {
+        $this->captured[] = $event;
+
+        return ProjectionOutcome::accepted($event->logicalEventKey);
     }
 }
 

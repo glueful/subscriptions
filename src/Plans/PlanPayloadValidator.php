@@ -13,6 +13,8 @@ final class PlanPayloadValidator
     private const ENTITLEMENT_KEY_MAX_LENGTH = 128;
     private const DESCRIPTION_MAX_LENGTH = 255;
     private const PROVIDER_PRICE_ID_MAX_LENGTH = 191;
+    private const PROVIDER_IDENTIFIER_KEY_PATTERN = '/\A[a-z0-9_-]{1,50}\z/';
+    private const PROVIDER_IDENTIFIER_VALUE_MAX_LENGTH = 191;
 
     /**
      * @param array<string,mixed> $payload
@@ -37,6 +39,9 @@ final class PlanPayloadValidator
             'entitlements' => $this->validateEntitlements($payload['entitlements']),
             'provider_price_id' => $this->validateProviderPriceId(
                 $payload['provider_price_id'] ?? null,
+            ),
+            'provider_identifiers' => $this->validateProviderIdentifiers(
+                $payload['provider_identifiers'] ?? null,
             ),
             'status' => $this->validateStatus($payload['status']),
             'sort_order' => $this->validateSortOrder($payload['sort_order'] ?? 0),
@@ -75,6 +80,12 @@ final class PlanPayloadValidator
         if (array_key_exists('provider_price_id', $payload)) {
             $validated['provider_price_id'] = $this->validateProviderPriceId(
                 $payload['provider_price_id'],
+            );
+        }
+
+        if (array_key_exists('provider_identifiers', $payload)) {
+            $validated['provider_identifiers'] = $this->validateProviderIdentifiers(
+                $payload['provider_identifiers'],
             );
         }
 
@@ -130,6 +141,7 @@ final class PlanPayloadValidator
             'description' => $configPlan['description'] ?? null,
             'entitlements' => $configPlan['entitlements'] ?? [],
             'provider_price_id' => $providerPriceId,
+            'provider_identifiers' => $configPlan['provider_identifiers'] ?? null,
             'status' => $status,
             'sort_order' => $configPlan['sort_order'] ?? 0,
         ]);
@@ -216,6 +228,53 @@ final class PlanPayloadValidator
     private function validateProviderPriceId(mixed $value): ?string
     {
         return $this->nullableString($value, 'provider_price_id', self::PROVIDER_PRICE_ID_MAX_LENGTH);
+    }
+
+    /**
+     * The per-gateway checkout-purchasability map (design spec §4.2): a closed
+     * `{gateway_key: identifier}` map, validated on EVERY write path this
+     * validator serves (create/update/import-config). `null`/absent normalizes
+     * to `[]` -- no identifiers configured, so the plan is not purchasable
+     * anywhere until an operator explicitly sets one (no automatic migration
+     * from `provider_price_id`).
+     *
+     * @return array<string,string>
+     */
+    private function validateProviderIdentifiers(mixed $value): array
+    {
+        if ($value === null) {
+            return [];
+        }
+
+        if (!is_array($value)) {
+            throw new InvalidArgumentException('provider_identifiers must be an object/map.');
+        }
+
+        $identifiers = [];
+        foreach ($value as $gateway => $identifier) {
+            if (!is_string($gateway) || preg_match(self::PROVIDER_IDENTIFIER_KEY_PATTERN, $gateway) !== 1) {
+                throw new InvalidArgumentException(
+                    'provider_identifiers keys must match [a-z0-9_-] and be 1-50 characters.'
+                );
+            }
+
+            if (!is_string($identifier) || $identifier === '') {
+                throw new InvalidArgumentException(
+                    "provider_identifiers.{$gateway} must be a non-empty string."
+                );
+            }
+
+            if (strlen($identifier) > self::PROVIDER_IDENTIFIER_VALUE_MAX_LENGTH) {
+                throw new InvalidArgumentException(
+                    "provider_identifiers.{$gateway} must be "
+                    . self::PROVIDER_IDENTIFIER_VALUE_MAX_LENGTH . ' characters or fewer.'
+                );
+            }
+
+            $identifiers[$gateway] = $identifier;
+        }
+
+        return $identifiers;
     }
 
     private function validateStatus(mixed $value): string

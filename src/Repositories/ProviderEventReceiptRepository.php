@@ -88,6 +88,50 @@ class ProviderEventReceiptRepository
     }
 
     /**
+     * The exact logical-key SETTLED-outcome read (design spec §4.3, Task 12):
+     * the ONLY way `SubscriptionEventProjector::projectWithOutcome()` may recover
+     * what a stored receipt actually decided on a duplicate delivery -- both the
+     * early `existsByLogicalKey()` short-circuit and a caught `insertPending()`
+     * unique-violation re-read through THIS method rather than fabricating a
+     * generic "already handled" no-op outcome of their own.
+     *
+     * Deliberately refuses (returns null for) a `pending` row -- nothing has
+     * settled yet, so there is no outcome to report -- and a missing row exactly
+     * the same way. Callers must not construct a fake outcome for either case;
+     * under this repository's own claim-then-settle invariant (the whole
+     * claim+resolve+settle sequence commits atomically in one transaction) a row
+     * visible to a SEPARATE read is always already settled, so "pending" here
+     * signals an invariant violation, not a normal race window.
+     *
+     * @return array{outcome:string,reason:?string,logical_event_key:string}|null
+     */
+    public function findOutcomeByLogicalKey(ApplicationContext $context, string $gateway, string $key): ?array
+    {
+        $row = db($context)->table('subscription_provider_event_receipts')
+            ->where('provider_gateway', '=', $gateway)
+            ->where('provider_logical_event_key', '=', $key)
+            ->limit(1)
+            ->first();
+
+        if ($row === null) {
+            return null;
+        }
+
+        $outcome = (string) ($row['outcome'] ?? '');
+        if ($outcome !== 'accepted' && $outcome !== 'rejected') {
+            return null; // still 'pending' (or an unrecognized value) -- nothing settled
+        }
+
+        $rejectionCode = $row['rejection_code'] ?? null;
+
+        return [
+            'outcome' => $outcome,
+            'reason' => is_scalar($rejectionCode) && (string) $rejectionCode !== '' ? (string) $rejectionCode : null,
+            'logical_event_key' => (string) ($row['provider_logical_event_key'] ?? $key),
+        ];
+    }
+
+    /**
      * Cross-driver unique-violation detection, delegated to the shared
      * UniqueViolations helper (spec §8) so this repository and
      * SubscriptionEventRepository share the exact same detection logic.

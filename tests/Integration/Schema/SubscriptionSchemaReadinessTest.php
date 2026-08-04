@@ -68,6 +68,24 @@ final class SubscriptionSchemaReadinessTest extends SubscriptionsTestCase
         self::assertFalse($readiness->isReady());
     }
 
+    /**
+     * Task 10 (design spec §4.1): migration 007's
+     * `subscriptions.checkout_origination_uuid` is part of the minimum 2.x runtime
+     * shape this class checks -- a database that ran 001-006 but not 007 is a
+     * partial/downgraded install, not a legitimate one, and must resolve to NOT
+     * ready exactly like a missing subject-model column does.
+     */
+    public function testNotReadyWhenCheckoutOriginationUuidColumnIsMissing(): void
+    {
+        $this->connection()->getSchemaBuilder()
+            ->dropIndex('subscriptions', 'idx_subscriptions_checkout_origination');
+        $this->dropColumn('subscriptions', 'checkout_origination_uuid');
+
+        $readiness = new SubscriptionSchemaReadiness($this->appContext());
+
+        self::assertFalse($readiness->isReady());
+    }
+
     public function testNotReadyWhenOverridesSubjectUuidColumnIsMissing(): void
     {
         // subject_uuid is part of uniq_override_subject_entitlement -- SQLite
@@ -96,6 +114,22 @@ final class SubscriptionSchemaReadinessTest extends SubscriptionsTestCase
         // constraint as the overrides case above.
         $this->connection()->getSchemaBuilder()->dropIndex('subscription_plans', 'uniq_plans_scope_key');
         $this->dropColumn('subscription_plans', 'owner_tenant_uuid');
+
+        $readiness = new SubscriptionSchemaReadiness($this->appContext());
+
+        self::assertFalse($readiness->isReady());
+    }
+
+    /**
+     * Task 13 (design spec §4.2): migration 008's
+     * `subscription_plans.provider_identifiers` is part of the minimum 2.x runtime
+     * shape this class checks -- a database that ran 001-007 but not 008 is a
+     * partial/downgraded install, not a legitimate 2.1 one, and must resolve to
+     * NOT ready exactly like a missing subject-model column does.
+     */
+    public function testNotReadyWhenPlansProviderIdentifiersColumnIsMissing(): void
+    {
+        $this->dropColumn('subscription_plans', 'provider_identifiers');
 
         $readiness = new SubscriptionSchemaReadiness($this->appContext());
 

@@ -75,9 +75,52 @@ final class EntitlementResolverTest extends SubscriptionsTestCase
         self::assertSame(self::FREE, $this->resolver()->resolveMap($this->appContext(), 'tenantA'));
     }
 
+    /**
+     * Task 11 (design spec §3.7/§4.3): `non_renewing` grants the plan only while
+     * `current_period_end` is still in the future -- wired end-to-end (real clock,
+     * not the unit-level EffectivePlanResolverTest's injected $now) through
+     * EntitlementResolver::resolveMap().
+     */
+    public function testNonRenewingBeforeBoundaryKeepsProEntitlements(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'non_renewing',
+            'current_period_end' => (new \DateTimeImmutable('+1 hour'))->format('Y-m-d H:i:s'),
+        ]);
+
+        self::assertSame(self::PRO, $this->resolver()->resolveMap($this->appContext(), 'tenantA'));
+    }
+
+    public function testNonRenewingAfterBoundaryDowngradesToDefaultEntitlements(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'pro',
+            'status' => 'non_renewing',
+            'current_period_end' => (new \DateTimeImmutable('-1 hour'))->format('Y-m-d H:i:s'),
+        ]);
+
+        self::assertSame(self::FREE, $this->resolver()->resolveMap($this->appContext(), 'tenantA'));
+    }
+
     public function testTenantWithNoSubscriptionResolvesDefaultEntitlements(): void
     {
         self::assertSame(self::FREE, $this->resolver()->resolveMap($this->appContext(), 'ghost'));
+    }
+
+    /**
+     * Task 10 (design spec §4.1): an `incomplete` row -- the shape
+     * `SubscriptionService::reserveCheckoutFor()` creates -- is NON-ENTITLING. It
+     * must resolve identically to `canceled`/no-subscription, never to the plan it
+     * is reserved against, even though `plan_key` on the row is already 'pro'.
+     */
+    public function testIncompleteProReservationDowngradesToDefaultEntitlements(): void
+    {
+        $this->seedSubscription(['tenant_uuid' => 'tenantA', 'plan_key' => 'pro', 'status' => 'incomplete']);
+
+        self::assertSame(self::FREE, $this->resolver()->resolveMap($this->appContext(), 'tenantA'));
     }
 
     public function testActiveOverrideWinsPerKeyAndExpiredOverrideIsIgnored(): void

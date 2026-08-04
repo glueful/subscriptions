@@ -31,7 +31,13 @@ use Glueful\Helpers\Utils;
  */
 final class SubscriptionService
 {
-    private const KNOWN_STATUSES = ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused'];
+    // 'non_renewing' (design spec §4.3, Task 11) is added to the allowlist here in
+    // Task 10 ONLY so fixtures can seed it directly -- reserveCheckoutFor()'s own
+    // already_subscribed guard checks for it explicitly (see guardAgainstEntitledSubject()
+    // below); the rest of the vocabulary (grace/entitlement semantics) lands in Task 11.
+    private const KNOWN_STATUSES = [
+        'active', 'trialing', 'past_due', 'canceled', 'incomplete', 'paused', 'non_renewing',
+    ];
 
     /** Bulk-read batch bound (spec §6.1), measured POST-normalization/dedup. */
     public const MAX_TENANT_BATCH = 100;
@@ -331,6 +337,146 @@ final class SubscriptionService
         );
     }
 
+    /**
+     * The origination-bound checkout reservation seam (design spec §4.1, Task 10):
+     * the ONLY way self-serve checkout may create a local `status = 'incomplete'`
+     * row for the projector to later relink a provider subscription onto --
+     * `SubscriptionEventProjector` only relinks EXISTING rows, it never creates one.
+     *
+     * Always attempts the insert FIRST (optimistic, mirroring `startFor()`'s own
+     * insert-then-resolve shape) rather than reading `findBySubject()` up front:
+     * `uniq_subscriptions_subject` guarantees the insert fails with a unique
+     * violation whenever a row already exists for this subject, so EVERY "already
+     * has a row" case -- idempotent replay, an ad-hoc replace attempt, a flagged
+     * replace, a genuinely concurrent two-writer race, or an already_subscribed
+     * refusal -- flows through the exact same `resolveLostReservationRace()`
+     * decision, instead of duplicating it behind a separate up-front read.
+     *
+     * `$opts['actor']` (nullable) is audit-stamped into the `checkout_reserved`
+     * event's `data.actor` -- there is no dedicated `actor` column on
+     * `subscription_events` (mirrors how `startFor()`/`changePlanFor()` fold their
+     * own extra context into `data` rather than adding columns).
+     *
+     * @param array<string,mixed> $opts 'replace' (bool, default false), 'actor' (mixed, default null)
+     * @return array<string,mixed>
+     * @throws CheckoutReservationException 'already_subscribed' when the subject already
+     *         has an entitling subscription (active/trialing/past_due, or an unexpired
+     *         non_renewing row); 'checkout_reservation_replace_refused' when an existing
+     *         `incomplete` reservation differs by origination/plan and $opts['replace']
+     *         was not passed as true.
+     */
+    public function reserveCheckoutFor(
+        Subject $subject,
+        string $planUuid,
+        string $originationUuid,
+        array $opts = [],
+    ): array {
+        $this->assertValidSubject($subject);
+
+        $originationUuid = trim($originationUuid);
+        if ($originationUuid === '') {
+            throw new \InvalidArgumentException('reserveCheckoutFor() requires a non-empty origination UUID.');
+        }
+
+        $plan = $this->requireAssignablePlan($subject, $planUuid);
+        $planKey = (string) ($plan['plan_key'] ?? '');
+        $replace = (bool) ($opts['replace'] ?? false);
+        $actor = $opts['actor'] ?? null;
+
+        $row = array_merge(
+            [
+                'uuid' => Utils::generateNanoID(12),
+                'tenant_uuid' => $subject->tenantUuid,
+                'subject_type' => $subject->type,
+                'subject_uuid' => $subject->uuid,
+            ],
+            $this->reservationChanges($planUuid, $planKey, $originationUuid)
+        );
+
+        return TenantIntegration::runAsTenantOr(
+            $this->context,
+            $subject->tenantUuid,
+            function () use ($row, $subject, $planUuid, $planKey, $originationUuid, $replace, $actor): array {
+                $winner = db($this->context)->transaction(
+                    function () use (
+                        $row,
+                        $subject,
+                        $planUuid,
+                        $planKey,
+                        $originationUuid,
+                        $replace,
+                        $actor
+                    ): ?array {
+                        try {
+                            // NESTED transaction => SAVEPOINT, exactly like startFor(): a unique
+                            // violation rolls back only to the savepoint so the surrounding
+                            // transaction stays usable for the re-read/decision below.
+                            db($this->context)->transaction(function () use ($row): void {
+                                $this->subscriptions->insert($this->context, $row);
+                            });
+                        } catch (\Throwable $e) {
+                            if (!UniqueViolations::isUniqueViolation($e)) {
+                                throw $e;
+                            }
+
+                            return $this->resolveLostReservationRace(
+                                $subject,
+                                $planUuid,
+                                $planKey,
+                                $originationUuid,
+                                $replace,
+                                $actor,
+                                $e
+                            );
+                        }
+
+                        $this->recordReservationEvent($subject, null, $originationUuid, $planKey, $actor);
+
+                        return null;
+                    }
+                );
+
+                return $winner ?? $this->requireCurrentFor($subject);
+            }
+        );
+    }
+
+    /**
+     * Reservation cleanup (design spec §4.1, Task 10): releases a reservation whose
+     * origination reached a terminal, non-dispatched state (e.g. Payvia's
+     * `failed`/`expired`/`abandoned`, or an operator resolution). A pure
+     * compare-and-delete guarded by the exact origination, `status = 'incomplete'`,
+     * and no provider field present.
+     *
+     * @return bool true when a row was actually deleted; false when nothing matched.
+     *         `false` is deliberately overloaded -- it means EITHER "no such
+     *         reservation exists" (already released, wrong origination, no row at
+     *         all) OR "refused: the row carries provider fields" (the projector has
+     *         since settled it -- releasing it now would delete a real subscription).
+     *         This method does not distinguish the two cases itself (that would be a
+     *         second, TOCTOU-prone read outside the CAS), so callers that need to
+     *         react differently -- Payvia's `CheckoutReconciliationService`
+     *         continuation, Thallo's abandon flow -- must branch on the boolean
+     *         result of THIS call, never re-query state before/after to infer which
+     *         `false` case occurred.
+     */
+    public function releaseCheckoutReservation(Subject $subject, string $originationUuid): bool
+    {
+        $this->assertValidSubject($subject);
+
+        return TenantIntegration::runAsTenantOr(
+            $this->context,
+            $subject->tenantUuid,
+            fn (): bool => db($this->context)->transaction(
+                fn (): bool => $this->subscriptions->deleteIncompleteReservation(
+                    $this->context,
+                    $subject,
+                    $originationUuid
+                ) > 0
+            )
+        );
+    }
+
     // ===========================================
     // Preserved 1.x tenant facade (spec §7)
     // ===========================================
@@ -453,6 +599,160 @@ final class SubscriptionService
         }
 
         return $winner;
+    }
+
+    /**
+     * `reserveCheckoutFor()`'s lost-insert-race resolution (design spec §4.1): re-reads
+     * the row that now exists for this subject and applies the SAME decision every
+     * caller must go through, whether the row got there via a genuinely concurrent
+     * writer or a prior sequential call:
+     *  1. already_subscribed guard first -- an entitling row is never touched.
+     *  2. same origination + same plan -> idempotent no-op, returns the row unchanged.
+     *  3. an `incomplete` row on a DIFFERENT origination/plan without `$replace` ->
+     *     refused (this is the two-writer race the spec calls out: the losing plan
+     *     request must never silently steal the reservation).
+     *  4. otherwise (a non-entitling, non-`incomplete` row -- canceled, or an expired
+     *     non_renewing row -- OR an `incomplete` row with `$replace = true`) -> the
+     *     row is overwritten onto the new reservation.
+     *
+     * @return array<string,mixed>
+     * @throws CheckoutReservationException see reserveCheckoutFor()'s own docblock.
+     */
+    private function resolveLostReservationRace(
+        Subject $subject,
+        string $planUuid,
+        string $planKey,
+        string $originationUuid,
+        bool $replace,
+        mixed $actor,
+        \Throwable $violation
+    ): array {
+        $current = $this->subscriptions->findBySubject($this->context, $subject);
+        if ($current === null) {
+            // The unique violation was not the subject unique (e.g. the provider-
+            // subscription unique) -- there is no winner row to reconcile against,
+            // so this is a genuine unexpected error, not a reservation race.
+            throw $violation;
+        }
+
+        $this->guardAgainstEntitledSubject($subject, $current);
+
+        if ($this->isSameReservation($current, $planUuid, $originationUuid)) {
+            return $current;
+        }
+
+        if ((string) ($current['status'] ?? '') === 'incomplete' && !$replace) {
+            throw CheckoutReservationException::replaceRequiresFlag($subject);
+        }
+
+        $this->subscriptions->updateBySubject(
+            $this->context,
+            $subject,
+            $this->reservationChanges($planUuid, $planKey, $originationUuid)
+        );
+
+        $fromStatus = (string) ($current['status'] ?? '');
+        $this->recordReservationEvent($subject, $fromStatus, $originationUuid, $planKey, $actor);
+
+        return $this->requireCurrentFor($subject);
+    }
+
+    /**
+     * `already_subscribed` guard (design spec §4.1): active/trialing/past_due are
+     * always entitling. `non_renewing` is entitling ONLY while its period end is
+     * still in the future -- an expired one is non-entitling and never refused here.
+     * Every other status (incomplete, canceled, paused, unknown) is non-entitling and
+     * falls through.
+     *
+     * @param array<string,mixed> $current
+     */
+    private function guardAgainstEntitledSubject(Subject $subject, array $current): void
+    {
+        $status = (string) ($current['status'] ?? '');
+
+        if (in_array($status, ['active', 'trialing', 'past_due'], true)) {
+            throw CheckoutReservationException::alreadySubscribed($subject);
+        }
+
+        if ($status === 'non_renewing' && $this->periodEndInFuture($current['current_period_end'] ?? null)) {
+            throw CheckoutReservationException::alreadySubscribed($subject);
+        }
+    }
+
+    /**
+     * Mirrors EffectivePlanResolver::withinGrace()'s parse-defensively shape: an
+     * absent/unparseable period end is treated as NOT in the future -- i.e. NOT
+     * blocking -- rather than raising or fail-closing the other way, matching the
+     * spec's literal "current_period_end in future" test.
+     */
+    private function periodEndInFuture(mixed $periodEnd): bool
+    {
+        if (!is_scalar($periodEnd) || (string) $periodEnd === '') {
+            return false;
+        }
+
+        try {
+            return new \DateTimeImmutable((string) $periodEnd) > new \DateTimeImmutable('now');
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * @param array<string,mixed> $current
+     */
+    private function isSameReservation(array $current, string $planUuid, string $originationUuid): bool
+    {
+        return (string) ($current['status'] ?? '') === 'incomplete'
+            && (string) ($current['plan_uuid'] ?? '') === $planUuid
+            && (string) ($current['checkout_origination_uuid'] ?? '') === $originationUuid;
+    }
+
+    /**
+     * The reservation row shape (design spec §4.1): NON-ENTITLING, no provider
+     * fields, no trial/period/cancellation timestamps carried over from whatever the
+     * row previously represented (a prior incomplete reservation, a canceled
+     * subscription, or an expired non_renewing one).
+     *
+     * @return array<string,mixed>
+     */
+    private function reservationChanges(string $planUuid, string $planKey, string $originationUuid): array
+    {
+        return [
+            'plan_uuid' => $planUuid,
+            'plan_key' => $planKey,
+            'status' => 'incomplete',
+            'checkout_origination_uuid' => $originationUuid,
+            'provider_gateway' => null,
+            'provider_customer_id' => null,
+            'provider_subscription_id' => null,
+            'provider_price_id' => null,
+            'trial_ends_at' => null,
+            'current_period_end' => null,
+            'canceled_at' => null,
+            'grace_ends_at' => null,
+        ];
+    }
+
+    private function recordReservationEvent(
+        Subject $subject,
+        ?string $fromStatus,
+        string $originationUuid,
+        string $planKey,
+        mixed $actor
+    ): void {
+        $data = ['origination_uuid' => $originationUuid, 'plan_key' => $planKey];
+        if ($actor !== null) {
+            $data['actor'] = $actor;
+        }
+
+        $this->appendEvent($subject, [
+            'type' => 'checkout_reserved',
+            'from_status' => $fromStatus,
+            'to_status' => 'incomplete',
+            'source' => 'checkout_reservation',
+            'data' => $data,
+        ]);
     }
 
     /**

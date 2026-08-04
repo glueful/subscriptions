@@ -6,9 +6,9 @@ namespace Glueful\Extensions\Subscriptions\Projection;
 
 /**
  * Internal control-flow signal ONLY -- never escapes
- * SubscriptionEventProjector::project(). Carries one of the allowlisted,
- * DETERMINISTIC rejection codes (missing_subject, invalid_subject,
- * plan_scope_mismatch, subject_mismatch): a validation failure that would
+ * SubscriptionEventProjector::project()/projectWithOutcome(). Carries one of the
+ * allowlisted, DETERMINISTIC rejection codes (missing_subject, invalid_subject,
+ * plan_scope_mismatch, subject_mismatch, origination_mismatch): a validation failure that would
  * fail identically on every retry, so -- unlike
  * UnmappedProviderSubscriptionException -- it is caught INSIDE the projection
  * transaction, settles the receipt `rejected` with this code, and the

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Subscriptions\Bridge;
 
 use Glueful\Extensions\Subscriptions\Contracts\SubscriptionEventProjectorInterface;
+use Glueful\Extensions\Subscriptions\Projection\ProjectionOutcome;
 use Glueful\Extensions\Subscriptions\Projection\ProviderSubscriptionEvent;
 
 /**
@@ -47,11 +48,29 @@ final class PayviaSubscriptionEventBridge
      */
     public function projectInner(object $inner): void
     {
-        $this->projector->project(new ProviderSubscriptionEvent(
+        $this->projector->project($this->toDto($inner));
+    }
+
+    /**
+     * The outcome-returning twin of {@see projectInner()} (design spec §4.3, Task 12):
+     * the SAME DTO mapping, but through `SubscriptionEventProjectorInterface::
+     * projectWithOutcome()` so `StrictPayviaSubscriptionEventBridge::handle()` can
+     * acknowledge Payvia's durable projection-acknowledgement contract afterward.
+     * The ordinary bus lane has no acknowledger to satisfy, so its `__invoke()`
+     * keeps calling the void `projectInner()` above unchanged.
+     */
+    public function projectInnerWithOutcome(object $inner): ProjectionOutcome
+    {
+        return $this->projector->projectWithOutcome($this->toDto($inner));
+    }
+
+    private function toDto(object $inner): ProviderSubscriptionEvent
+    {
+        return new ProviderSubscriptionEvent(
             gateway: (string) $inner->gateway(),
             type: (string) $inner->type(),
             logicalEventKey: (string) $inner->logicalEventKey(),
             normalized: (array) $inner->normalized(),
-        ));
+        );
     }
 }

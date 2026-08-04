@@ -135,6 +135,38 @@ final class ProviderEventDataTest extends TestCase
         self::assertSame([], ProviderEventData::sanitize([]));
     }
 
+    /**
+     * Task 11 (design spec §3.7/§4.3): `cancellation_mode` joins the top-level
+     * allowlist so a stop_renewal disable's receipt/event row survives
+     * sanitization for later diagnosis.
+     */
+    public function testCancellationModeSurvivesSanitization(): void
+    {
+        $sanitized = ProviderEventData::sanitize([
+            'gateway_subscription_id' => 'sub_1',
+            'cancellation_mode' => 'stop_renewal',
+            'current_period_end' => '2030-01-01 00:00:00',
+        ]);
+
+        self::assertSame([
+            'gateway_subscription_id' => 'sub_1',
+            'current_period_end' => '2030-01-01 00:00:00',
+            'cancellation_mode' => 'stop_renewal',
+        ], $sanitized);
+    }
+
+    public function testHostileNestedValueUnderCancellationModeIsRejected(): void
+    {
+        $sanitized = ProviderEventData::sanitize([
+            'cancellation_mode' => [
+                'value' => 'stop_renewal',
+                'api_key' => 'sk_live_hostile',
+            ],
+        ]);
+
+        self::assertSame(['cancellation_mode' => ['value' => 'stop_renewal']], $sanitized);
+    }
+
     public function testUnknownTopLevelKeysAreDroppedEvenWhenBenignLooking(): void
     {
         $sanitized = ProviderEventData::sanitize([
