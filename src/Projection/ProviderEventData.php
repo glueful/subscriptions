@@ -40,7 +40,14 @@ final class ProviderEventData
     // ordinary immediate cancellation.
     private const TOP_LEVEL_ALLOW =
         ['gateway_subscription_id', 'status', 'current_period_end', 'cancellation_mode', 'metadata'];
-    private const METADATA_ALLOW = ['tenant_uuid', 'subject_type', 'subject_uuid', 'plan_uuid', 'glueful_consumer'];
+    // 'origination_uuid' (design spec §4.3, Task 12): the opaque Payvia checkout
+    // correlation token -- already the trust anchor SubscriptionEventProjector's
+    // origination_mismatch guard reads off event metadata -- is allowlisted here too
+    // so an accepted/rejected receipt (and the historical subscription_events row)
+    // ties its outcome back to the checkout attempt for operator diagnosis, without
+    // retaining any other provider/customer payload field.
+    private const METADATA_ALLOW =
+        ['tenant_uuid', 'subject_type', 'subject_uuid', 'plan_uuid', 'glueful_consumer', 'origination_uuid'];
 
     private const SECRET_KEY_PATTERN =
         '/token|secret|password|authorization|signature|api_key|client_secret/i';

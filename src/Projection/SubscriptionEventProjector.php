@@ -32,7 +32,8 @@ use Psr\Log\LoggerInterface;
  *
  * Once claimed, resolution splits by DETERMINISM (spec ruling, fix round 2):
  * - Deterministic rejections (missing_subject, invalid_subject,
- *   plan_scope_mismatch, subject_mismatch) will fail the exact same way on
+ *   plan_scope_mismatch, subject_mismatch, origination_mismatch -- the last added
+ *   in Task 12, design spec §4.1/§3.3) will fail the exact same way on
  *   every redelivery, so they are caught here as {@see RejectedProviderEventException},
  *   settle the receipt `rejected`, and COMMIT -- a rejection is a diagnosable
  *   outcome, not an error.
@@ -103,19 +104,41 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
     }
 
     /**
-     * Runs entirely through `TenantIntegration::runAsSystemOr()` (spec §9): the
-     * target subscription must be DISCOVERED (by provider gateway/subscription id,
-     * not by tenant) before any tenant context could even be known, so this is
-     * trusted system work, never tenant-scoped work.
+     * The void 1.x facade (unchanged contract): delegates to {@see projectWithOutcome()}
+     * and discards its return value. Every exception this used to throw still
+     * propagates identically -- only a NEW caller that wants the settled outcome
+     * needs to switch entry points.
      */
     public function project(ProviderSubscriptionEvent $event): void
     {
-        TenantIntegration::runAsSystemOr($this->context, function () use ($event): void {
-            $this->projectInTransaction($event);
-        });
+        $this->projectWithOutcome($event);
     }
 
-    private function projectInTransaction(ProviderSubscriptionEvent $event): void
+    /**
+     * Additive outcome-returning entry point (design spec §4.3, Task 12), used by
+     * {@see \Glueful\Extensions\Subscriptions\Bridge\StrictPayviaSubscriptionEventBridge}
+     * to acknowledge Payvia's durable projection-acknowledgement contract. Runs
+     * through the EXACT SAME `TenantIntegration::runAsSystemOr()` + claim-first
+     * transaction machinery as the void facade always has -- this is a pure
+     * additive wrapper around the same rules, not a second projection path:
+     * - accepted or a deterministic rejection settle a receipt and return the
+     *   matching {@see ProjectionOutcome};
+     * - a duplicate logical key (whether caught by the cheap read-side early-out
+     *   or by a unique-insert race) re-reads and returns the ALREADY-STORED
+     *   receipt's outcome via `ProviderEventReceiptRepository::findOutcomeByLogicalKey()`
+     *   -- never a fabricated generic no-op;
+     * - unmapped/transient failures still throw, uncaught, exactly as before --
+     *   there is no settled outcome to report for either.
+     */
+    public function projectWithOutcome(ProviderSubscriptionEvent $event): ProjectionOutcome
+    {
+        return TenantIntegration::runAsSystemOr(
+            $this->context,
+            fn (): ProjectionOutcome => $this->projectInTransaction($event)
+        );
+    }
+
+    private function projectInTransaction(ProviderSubscriptionEvent $event): ProjectionOutcome
     {
         // Clamp the three provider-sourced identity strings ONCE, here at the
         // boundary, before anything reads or writes them: the same clamped values
@@ -134,7 +157,7 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             && $logicalKey !== ''
             && $this->receipts->existsByLogicalKey($this->context, $gateway, $logicalKey)
         ) {
-            return;
+            return $this->storedOutcomeOrFail($gateway, $logicalKey);
         }
 
         $receiptUuid = Utils::generateNanoID(12);
@@ -150,8 +173,15 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
         );
 
         try {
-            db($this->context)->transaction(
-                function () use ($receiptUuid, $pendingRow, $gateway, $type, $logicalKey, $normalized): void {
+            return db($this->context)->transaction(
+                function () use (
+                    $receiptUuid,
+                    $pendingRow,
+                    $gateway,
+                    $type,
+                    $logicalKey,
+                    $normalized
+                ): ProjectionOutcome {
                     // (1) CLAIM -- throws on (provider_gateway, provider_logical_event_key) duplicate.
                     $this->receipts->insertPending($this->context, $pendingRow);
 
@@ -164,7 +194,9 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                         $sub = $this->resolveTarget($gateway, $type, $normalized);
                     } catch (RejectedProviderEventException $rejection) {
                         $this->receipts->markRejected($this->context, $receiptUuid, $rejection->rejectionCode);
-                        return; // rejected receipts COMMIT -- nothing else changes.
+
+                        // rejected receipts COMMIT -- nothing else changes.
+                        return ProjectionOutcome::rejected($logicalKey, $rejection->rejectionCode);
                     }
 
                     // (3) PROJECT + ACCEPT, atomically.
@@ -196,6 +228,8 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                         'subject_uuid' => $subject->uuid,
                         'plan_uuid' => $this->scalarOrNull($sub['plan_uuid'] ?? null),
                     ]);
+
+                    return ProjectionOutcome::accepted($logicalKey);
                 }
             );
         } catch (\Throwable $e) {
@@ -210,13 +244,45 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                     'error' => $e->getMessage(),
                 ]);
 
-                return; // a concurrent/duplicate delivery already owns this logical event
+                // A concurrent/duplicate delivery already owns this logical event --
+                // its transaction committed atomically (claim + resolve + settle), so
+                // the receipt is always already settled by the time our own unique
+                // violation is raised. Re-read its stored verdict rather than
+                // fabricating a no-op.
+                return $this->storedOutcomeOrFail($gateway, $logicalKey);
             }
             // Transient failure OR UnmappedProviderSubscriptionException: the whole
             // transaction rolled back (pending receipt included); propagate so the
             // caller can retry (unmapped) or surface the failure (transient).
             throw $e;
         }
+    }
+
+    /**
+     * Re-reads a duplicate delivery's already-settled verdict (design spec §4.3):
+     * shared by both the cheap read-side early-out and the caught unique-violation
+     * race above, so neither path invents its own notion of "already handled".
+     *
+     * @throws \RuntimeException if the receipt exists but is not yet settled -- an
+     *         invariant violation under this class's own claim-then-settle-atomically
+     *         contract (see findOutcomeByLogicalKey()'s own docblock), never a normal
+     *         outcome a caller should branch on.
+     */
+    private function storedOutcomeOrFail(string $gateway, string $logicalKey): ProjectionOutcome
+    {
+        $settled = $this->receipts->findOutcomeByLogicalKey($this->context, $gateway, $logicalKey);
+        if ($settled === null) {
+            throw new \RuntimeException(
+                "Provider event receipt for gateway '{$gateway}' / logical key '{$logicalKey}' is claimed "
+                . 'but not yet settled -- this violates the claim-then-settle-atomically invariant.'
+            );
+        }
+
+        return ProjectionOutcome::fromStoredOutcome(
+            $settled['outcome'],
+            $settled['reason'],
+            $settled['logical_event_key']
+        );
     }
 
     /**
@@ -398,29 +464,38 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             throw $this->unmapped();
         }
 
-        return $this->relinkTenantSubscription($gateway, $gwSubId, $subject);
+        return $this->relinkTenantSubscription($gateway, $gwSubId, $subject, $normalized);
     }
 
     /**
      * The 1.x tenant-metadata relink recovery (unchanged rules, now gated on a
-     * validated subject above): an UNLINKED row named by metadata's tenant_uuid may
-     * be attached to this provider subscription. A row already linked to a
-     * DIFFERENT provider subscription is NEVER moved -- refused and logged as an
-     * anomaly, exactly as before.
+     * validated subject above, PLUS the origination guard below -- design spec
+     * §4.1/§3.3, Task 12): an UNLINKED row named by metadata's tenant_uuid may be
+     * attached to this provider subscription. A row already linked to a DIFFERENT
+     * provider subscription is NEVER moved -- refused and logged as an anomaly,
+     * exactly as before.
      *
+     * @param array<string,mixed> $normalized
      * @return array<string,mixed>
-     * @throws RejectedProviderEventException plan_scope_mismatch.
+     * @throws RejectedProviderEventException plan_scope_mismatch, or origination_mismatch
+     *         (see guardOriginationMatch()).
      * @throws UnmappedProviderSubscriptionException retryable: no row exists for
      *         this tenant (yet), or the row is linked to a different provider
      *         subscription and the link is refused.
      */
-    private function relinkTenantSubscription(string $gateway, string $gwSubId, Subject $subject): array
-    {
+    private function relinkTenantSubscription(
+        string $gateway,
+        string $gwSubId,
+        Subject $subject,
+        array $normalized,
+    ): array {
         $tenantUuid = $subject->tenantUuid;
         $existing = $this->subscriptions->findByTenant($this->context, $tenantUuid);
         if ($existing === null) {
             throw $this->unmapped();
         }
+
+        $this->guardOriginationMatch($existing, $normalized);
 
         $existingSubId = $this->scalarOrNull($existing['provider_subscription_id'] ?? null) ?? '';
 
@@ -464,6 +539,45 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
         }
 
         return $relinked;
+    }
+
+    /**
+     * The `origination_mismatch` guard (design spec §4.1/§3.3, Task 12): the
+     * activation-path check that a `subscription.created` delivery's metadata
+     * `origination_uuid` agrees with the reserved row it is about to relink onto.
+     * Chosen matrix (deliberately narrow -- ONLY fires for a row this checkout
+     * feature itself bound):
+     *
+     * - `$existing['checkout_origination_uuid']` is NULL (operator-created, or any
+     *   row that predates 2.2's `reserveCheckoutFor()`) -> NEVER checked. Accepts
+     *   exactly as every 1.x tenant-metadata relink already did, regardless of
+     *   whether the event happens to carry an origination_uuid (a Payvia-correlated
+     *   event landing on a pre-existing row is legitimate: the local row simply
+     *   predates the checkout feature -- see the spec's third matrix row).
+     * - Reserved row (`checkout_origination_uuid` set) + event metadata
+     *   `origination_uuid` === the stored value -> matches, activation proceeds.
+     * - Reserved row + missing or DIFFERENT event `origination_uuid` -> a
+     *   deterministic, committed rejection. This is the late/historical-settlement
+     *   conflict posture from spec §3.3: a stale checkout's webhook racing a NEWER
+     *   reservation that has since taken the subject must never overwrite it.
+     *
+     * @param array<string,mixed> $existing
+     * @param array<string,mixed> $normalized
+     * @throws RejectedProviderEventException origination_mismatch.
+     */
+    private function guardOriginationMatch(array $existing, array $normalized): void
+    {
+        $stored = $this->scalarOrNull($existing['checkout_origination_uuid'] ?? null);
+        if ($stored === null) {
+            return; // not an origination-bound reservation -- never checked
+        }
+
+        $metadata = is_array($normalized['metadata'] ?? null) ? $normalized['metadata'] : [];
+        $given = $this->scalarOrNull($metadata['origination_uuid'] ?? null);
+
+        if ($given !== $stored) {
+            throw new RejectedProviderEventException('origination_mismatch');
+        }
     }
 
     /**
