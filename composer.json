@@ -24,7 +24,7 @@
     },
     "require-dev": {
         "glueful/extension-contracts": "^1.5.0",
-        "glueful/framework": "^1.57.0",
+        "glueful/framework": "^1.79",
         "glueful/payvia": "^2.5",
         "phpstan/phpstan": "^1.0",
         "phpunit/phpunit": "^10.5",
@@ -67,18 +67,29 @@
             "publisher": "glueful-team",
             "provider": "Glueful\\Extensions\\Subscriptions\\SubscriptionsServiceProvider",
             "requires": {
-                "glueful": ">=1.57.0",
+                "glueful": ">=1.79.0",
                 "extensions": []
-            }
+            },
+            "migrations": [
+                {
+                    "id": "default",
+                    "path": "migrations",
+                    "priority": "dependent",
+                    "mode": "on_enable",
+                    "verifier": "Glueful\\Extensions\\Subscriptions\\Schema\\SubscriptionsSchemaVerifier"
+                }
+            ]
         }
     },
     "config": {
         "sort-packages": true
     },
-    "repositories": [{
-        "name": "extension-contracts",
-        "type": "path",
-        "url": "../contracts",
-        "canonical": false
-    }]
+    "repositories": [
+        {
+            "name": "extension-contracts",
+            "type": "path",
+            "url": "../contracts",
+            "canonical": false
+        }
+    ]
 }

@@ -2,6 +2,13 @@
 
 All notable changes to `glueful/subscriptions` are documented here.
 
+## [Unreleased]
+
+### Added
+- Declares the Glueful schema manifest (migration descriptors, requires.extensions, structural
+  verifier); requires framework >=1.79.0 for schema-on-enable participation. Migrations are now
+  registered by the manifest, not by provider boot.
+
 ## 2.2.0 -- 2026-08-04
 
 Four additive seams for the self-serve workspace checkout program (design

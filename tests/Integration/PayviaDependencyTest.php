@@ -89,7 +89,13 @@ final class PayviaDependencyTest extends TestCase
         $package = $this->payviaInstalledPackage();
 
         self::assertIsString($package['version'] ?? null);
-        self::assertStringStartsWith('2.5', (string) $package['version']);
+        // The declared constraint is ^2.5: any 2.x at or above 2.5 is a legitimate published
+        // dist — pinning the exact minor here just re-breaks on every routine payvia release.
+        $version = ltrim((string) $package['version'], 'v');
+        self::assertTrue(
+            version_compare($version, '2.5.0', '>=') && version_compare($version, '3.0.0', '<'),
+            "installed payvia {$version} must satisfy the declared ^2.5 constraint"
+        );
 
         $distType = $package['dist']['type'] ?? null;
         self::assertNotSame(
@@ -121,6 +127,10 @@ final class PayviaDependencyTest extends TestCase
 
         $installed = json_decode((string) file_get_contents($installedComposerPath), true, 512, JSON_THROW_ON_ERROR);
 
-        self::assertSame('2.5.0', $installed['version'] ?? null);
+        $version = ltrim((string) ($installed['version'] ?? ''), 'v');
+        self::assertTrue(
+            version_compare($version, '2.5.0', '>=') && version_compare($version, '3.0.0', '<'),
+            "runtime payvia {$version} must satisfy the declared ^2.5 constraint"
+        );
     }
 }
