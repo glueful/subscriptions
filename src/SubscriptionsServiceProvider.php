@@ -6,7 +6,6 @@ namespace Glueful\Extensions\Subscriptions;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Cache\CacheStore;
-use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Bridge\PayviaProviderStatePuller;
@@ -500,18 +499,8 @@ final class SubscriptionsServiceProvider extends ServiceProvider
 
     public function boot(ApplicationContext $context): void
     {
-        try {
-            $this->loadMigrationsFrom(
-                __DIR__ . '/../migrations',
-                MigrationPriority::DEPENDENT,
-                'glueful/subscriptions'
-            );
-        } catch (\Throwable $e) {
-            error_log('[Subscriptions] Failed to register migrations: ' . $e->getMessage());
-            if ($this->bootEnv() !== 'production') {
-                throw $e; // fail fast in non-production
-            }
-        }
+        // Migrations are declared by the composer manifest (extra.glueful.migrations):
+        // dependent priority, source glueful/subscriptions; the container factory registers.
 
         try {
             $this->app->get(\Glueful\Extensions\ExtensionManager::class)->registerMeta(self::class, [
