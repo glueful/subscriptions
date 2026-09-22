@@ -68,6 +68,10 @@ final class PlanPurchasability
                 'plan_key' => (string) ($plan['plan_key'] ?? ''),
                 'name' => (string) ($plan['display_name'] ?? ''),
                 'provider_identifier' => $identifier,
+                // The display price (migration 009): what a plan picker shows. Null without one.
+                'price_amount' => isset($plan['price_amount']) ? (int) $plan['price_amount'] : null,
+                'price_currency' => isset($plan['price_currency']) ? (string) $plan['price_currency'] : null,
+                'billing_interval' => isset($plan['billing_interval']) ? (string) $plan['billing_interval'] : null,
             ];
         }
 

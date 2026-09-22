@@ -48,7 +48,28 @@ final class PlanPurchasabilityTest extends SubscriptionsTestCase
             'plan_key' => 'pro',
             'name' => 'Pro',
             'provider_identifier' => 'price_pro_stripe',
+            'price_amount' => null,
+            'price_currency' => null,
+            'billing_interval' => null,
         ], $result[0]);
+    }
+
+    public function testAPurchasablePlanCarriesItsDisplayPrice(): void
+    {
+        // A plan picker lists what can be bought; without the price it could not say the cost.
+        $this->seedPlan('pro', [
+            'status' => 'active',
+            'provider_identifiers' => ['stripe' => 'price_pro_stripe'],
+            'price_amount' => 1900,
+            'price_currency' => 'USD',
+            'billing_interval' => 'month',
+        ]);
+
+        $plan = PlanPurchasability::forGateway($this->appContext(), 'stripe')[0];
+
+        self::assertSame(1900, $plan['price_amount']);
+        self::assertSame('USD', $plan['price_currency']);
+        self::assertSame('month', $plan['billing_interval']);
     }
 
     public function testExcludesDraftPlansEvenWithAnIdentifierConfigured(): void

@@ -11,6 +11,8 @@ All notable changes to `glueful/subscriptions` are documented here.
   `price_currency` (ISO 4217) and `billing_interval` (day, week, month, year) to
   `subscription_plans`, accepted on create, patch and config import, all three or none. For a
   pricing page or plan picker to say what a plan costs; the gateway still decides what is charged.
+- `PlanPurchasability::forGateway()` returns each plan's `price_amount`, `price_currency` and
+  `billing_interval` (null when unset), so a plan picker can show the cost.
 
 ## [2.3.0] - 2026-08-17
 
