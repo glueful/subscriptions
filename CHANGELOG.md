@@ -4,6 +4,8 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-22
+
 ### Added
 - **A plan can carry a display price.** Migration `009` adds `price_amount` (minor units),
   `price_currency` (ISO 4217) and `billing_interval` (day, week, month, year) to
