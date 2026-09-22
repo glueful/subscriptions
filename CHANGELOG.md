@@ -4,6 +4,12 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## [Unreleased]
 
+### Added
+- **A plan can carry a display price.** Migration `009` adds `price_amount` (minor units),
+  `price_currency` (ISO 4217) and `billing_interval` (day, week, month, year) to
+  `subscription_plans`, accepted on create, patch and config import, all three or none. For a
+  pricing page or plan picker to say what a plan costs; the gateway still decides what is charged.
+
 ## [2.3.0] - 2026-08-17
 
 ### Added

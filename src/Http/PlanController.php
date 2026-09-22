@@ -80,7 +80,9 @@ final class PlanController extends BaseController
             . 'are booleans, non-negative integers, or explicit null. Body: `plan_key` (required; unique key '
             . 'of lowercase letters, numbers, dot, underscore, hyphen), `display_name` (required), '
             . '`description`, `entitlements` (required; entitlement map of bool|int>=0|null values), '
-            . '`provider_price_id`, `status` (required; one of draft, active, archived), `sort_order`. '
+            . '`provider_price_id`, `status` (required; one of draft, active, archived), `sort_order`, and a '
+            . 'display price: `price_amount` (minor units), `price_currency` (ISO 4217) and '
+            . '`billing_interval` (day, week, month, year), all three or none. '
             . 'Requires the `subscriptions.plans.manage` permission.',
         tags: ['Subscriptions'],
     )]
@@ -107,7 +109,8 @@ final class PlanController extends BaseController
             . 'cannot transition back to draft. Edits to active plans take effect immediately. Body: '
             . '`display_name`, `description` (new description or null), `entitlements` (replacement '
             . 'entitlement map of bool|int>=0|null values), `provider_price_id`, `status` (one of draft, '
-            . 'active, archived), `sort_order`. Requires the `subscriptions.plans.manage` permission.',
+            . 'active, archived), `sort_order`, `price_amount`, `price_currency`, `billing_interval` (a price '
+            . 'is checked whole against the stored one). Requires the `subscriptions.plans.manage` permission.',
         tags: ['Subscriptions'],
     )]
     #[ApiResponse(200, description: 'Plan updated')]

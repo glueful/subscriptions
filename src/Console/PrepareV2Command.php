@@ -147,7 +147,9 @@ final class PrepareV2Command extends BaseCommand
             // for audience/owner_tenant_uuid. The validator always returns the key
             // (normalized to [] when absent from config), so it must be stripped before
             // this frozen 1.x-shaped insert, not merely left unset in config.
-            unset($payload['provider_identifiers']);
+            // The display price (migration 009) is later still.
+            unset($payload['provider_identifiers'], $payload['price_amount'], $payload['price_currency']);
+            unset($payload['billing_interval']);
 
             if ($plans->findByKeyUnscoped($context, $planKey) !== null) {
                 continue;

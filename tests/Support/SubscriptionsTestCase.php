@@ -14,6 +14,7 @@ use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionPlans
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateSubscriptionsTable;
 use Glueful\Extensions\Subscriptions\Database\Migrations\CreateV2PreparationState;
 use Glueful\Extensions\Subscriptions\Database\Migrations\PlanProviderIdentifiers;
+use Glueful\Extensions\Subscriptions\Database\Migrations\PlanDisplayPrice;
 use Glueful\Extensions\Subscriptions\Database\Migrations\SubjectModel;
 use Glueful\Helpers\Utils;
 use PHPUnit\Framework\TestCase;
@@ -113,6 +114,7 @@ abstract class SubscriptionsTestCase extends TestCase
         (new SubjectModel())->up($schema);
         (new CheckoutReservations())->up($schema);
         (new PlanProviderIdentifiers())->up($schema);
+        (new PlanDisplayPrice())->up($schema);
     }
 
     /**
