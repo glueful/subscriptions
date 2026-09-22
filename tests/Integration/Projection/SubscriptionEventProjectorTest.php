@@ -103,6 +103,50 @@ final class SubscriptionEventProjectorTest extends SubscriptionsTestCase
         self::assertSame('past_due', $events[0]['to_status']);
     }
 
+    public function testAProviderPlanChangeMovesTheSubscriptionToThatPlan(): void
+    {
+        // A plan changed at the provider (Stripe swaps the price) arrives as subscription.updated
+        // with the new price; the local subscription stayed on its old plan and entitlements.
+        $this->connection()->table('subscription_plans')->where('plan_key', '=', 'pro')
+            ->update(['provider_identifiers' => json_encode(['stripe' => 'price_pro'])]);
+        $this->connection()->table('subscription_plans')->where('plan_key', '=', 'free')
+            ->update(['provider_identifiers' => json_encode(['stripe' => 'price_free'])]);
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'free',
+            'provider_gateway' => 'stripe',
+            'provider_subscription_id' => 'sub_S',
+        ]);
+
+        $this->project('subscription.updated', 'k-plan', [
+            'gateway_subscription_id' => 'sub_S',
+            'status' => 'active',
+            'gateway_price_id' => 'price_pro',
+        ], 'stripe');
+
+        $row = $this->row();
+        self::assertSame('pro', $row['plan_key']);
+        self::assertSame('planv2pro001', $row['plan_uuid']);
+    }
+
+    public function testAnUnknownPriceLeavesThePlanAlone(): void
+    {
+        $this->seedSubscription([
+            'tenant_uuid' => 'tenantA',
+            'plan_key' => 'free',
+            'provider_gateway' => 'stripe',
+            'provider_subscription_id' => 'sub_S',
+        ]);
+
+        $this->project('subscription.updated', 'k-unknown', [
+            'gateway_subscription_id' => 'sub_S',
+            'status' => 'active',
+            'gateway_price_id' => 'price_nobody',
+        ], 'stripe');
+
+        self::assertSame('free', $this->row()['plan_key']);
+    }
+
     public function testDuplicateEventNeverReprojectsNorExtendsGrace(): void
     {
         $this->seedSubscription([

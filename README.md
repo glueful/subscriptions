@@ -686,6 +686,12 @@ POST   /subscriptions/plans/{key}/archive
 reserved key `import-config` is rejected for plans so the collection import
 route cannot collide with a plan key.
 
+Since 2.4, a plan may carry a display price: `price_amount` (an integer in the
+currency's minor units, so `1900` is 19.00), `price_currency` (an ISO 4217 code,
+stored upper-case) and `billing_interval` (`day`, `week`, `month` or `year`). All
+three or none; a `PATCH` naming one is checked against the others as stored. It is
+for showing what a plan costs; the payment gateway decides what is charged.
+
 Since 2.2, `POST`/`PATCH` also accept `provider_identifiers` -- the
 per-gateway purchasability map (see [Per-gateway
 purchasability](#per-gateway-purchasability)); an invalid key or value

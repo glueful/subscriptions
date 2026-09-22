@@ -4,6 +4,20 @@ All notable changes to `glueful/subscriptions` are documented here.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-22
+
+### Added
+- **A plan can carry a display price.** Migration `009` adds `price_amount` (minor units),
+  `price_currency` (ISO 4217) and `billing_interval` (day, week, month, year) to
+  `subscription_plans`, accepted on create, patch and config import, all three or none. For a
+  pricing page or plan picker to say what a plan costs; the gateway still decides what is charged.
+- `PlanPurchasability::forGateway()` returns each plan's `price_amount`, `price_currency` and
+  `billing_interval` (null when unset), so a plan picker can show the cost.
+- **A plan changed at the provider follows locally.** A `subscription.updated` event whose price
+  (`gateway_price_id`) belongs to another plan in the subscription's scope, by that plan's
+  `provider_identifiers` for the gateway, moves the subscription to that plan and its entitlements.
+  An unknown price changes nothing.
+
 ## [2.3.0] - 2026-08-17
 
 ### Added

@@ -12,6 +12,7 @@ use Glueful\Extensions\Subscriptions\Lifecycle\TenantIntegration;
 use Glueful\Extensions\Subscriptions\Repositories\ProviderEventReceiptRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionEventRepository;
 use Glueful\Extensions\Subscriptions\Repositories\SubscriptionRepository;
+use Glueful\Extensions\Subscriptions\Repositories\SubscriptionPlanRepository;
 use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Subscriptions\SubjectType;
 use Glueful\Helpers\Utils;
@@ -720,7 +721,7 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
                     }
                 }
 
-                return $changes + $this->periodChanges($normalized);
+                return $changes + $this->periodChanges($normalized) + $this->planChanges($sub, $normalized);
 
             case 'subscription.past_due':
                 return [
@@ -753,6 +754,41 @@ final class SubscriptionEventProjector implements SubscriptionEventProjectorInte
             default:
                 return null;
         }
+    }
+
+    /**
+     * A plan changed at the provider: the event carries the new price, and the plan in the same
+     * scope whose identifier for this gateway is that price becomes the subscription's plan. An
+     * unknown price, or the current plan's own, changes nothing.
+     *
+     * @param array<string,mixed> $sub
+     * @param array<string,mixed> $normalized
+     * @return array<string,mixed>
+     */
+    private function planChanges(array $sub, array $normalized): array
+    {
+        $price = $this->scalarOrNull($normalized['gateway_price_id'] ?? null);
+        $gateway = $this->scalarOrNull($sub['provider_gateway'] ?? null);
+        $currentUuid = $this->scalarOrNull($sub['plan_uuid'] ?? null);
+        if ($price === null || $gateway === null || $currentUuid === null) {
+            return [];
+        }
+        $current = $this->catalog->planForUuid($currentUuid);
+        if ($current === null) {
+            return [];
+        }
+        $plans = (new SubscriptionPlanRepository())->listInScope(
+            $this->context,
+            (string) ($current['audience'] ?? ''),
+            (string) ($current['owner_tenant_uuid'] ?? ''),
+        );
+        foreach ($plans as $plan) {
+            $identifiers = is_array($plan['provider_identifiers'] ?? null) ? $plan['provider_identifiers'] : [];
+            if (($identifiers[$gateway] ?? null) === $price && (string) $plan['uuid'] !== $currentUuid) {
+                return ['plan_uuid' => (string) $plan['uuid'], 'plan_key' => (string) $plan['plan_key']];
+            }
+        }
+        return [];
     }
 
     /** @param array<string,mixed> $normalized */

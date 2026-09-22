@@ -33,6 +33,7 @@ final class SubscriptionsSchemaVerifier implements StructuralVerifierInterface
             '006_SubjectModel.php',
             '007_CheckoutReservations.php',
             '008_PlanProviderIdentifiers.php',
+            '009_PlanDisplayPrice.php',
         ];
     }
 
@@ -64,6 +65,9 @@ final class SubscriptionsSchemaVerifier implements StructuralVerifierInterface
             ]),
             '008_PlanProviderIdentifiers.php' => $this->tablesWithColumns($db, [
                 'subscription_plans' => ['provider_identifiers'],
+            ]),
+            '009_PlanDisplayPrice.php' => $this->tablesWithColumns($db, [
+                'subscription_plans' => ['price_amount', 'price_currency', 'billing_interval'],
             ]),
             default => false,
         };

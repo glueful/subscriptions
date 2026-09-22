@@ -45,7 +45,7 @@ final class PlanPayloadValidator
             ),
             'status' => $this->validateStatus($payload['status']),
             'sort_order' => $this->validateSortOrder($payload['sort_order'] ?? 0),
-        ];
+        ] + $this->validatePrice($payload);
     }
 
     /**
@@ -100,7 +100,53 @@ final class PlanPayloadValidator
             $validated['sort_order'] = $this->validateSortOrder($payload['sort_order']);
         }
 
+        // A price is validated whole: a patch naming any part is checked against the rest as stored.
+        if (array_intersect(array_keys($payload), self::PRICE_FIELDS) !== []) {
+            $merged = [];
+            foreach (self::PRICE_FIELDS as $field) {
+                $merged[$field] = array_key_exists($field, $payload)
+                    ? $payload[$field]
+                    : ($current[$field] ?? null);
+            }
+            $validated += $this->validatePrice($merged);
+        }
+
         return $validated;
+    }
+
+    private const PRICE_FIELDS = ['price_amount', 'price_currency', 'billing_interval'];
+    private const INTERVALS = ['day', 'week', 'month', 'year'];
+
+    /**
+     * A display price is all or nothing: an amount in minor units with an ISO 4217 currency and a
+     * billing interval, or none of the three.
+     *
+     * @param array<string,mixed> $payload
+     * @return array{price_amount: ?int, price_currency: ?string, billing_interval: ?string}
+     */
+    private function validatePrice(array $payload): array
+    {
+        $amount = $payload['price_amount'] ?? null;
+        $currency = $payload['price_currency'] ?? null;
+        $interval = $payload['billing_interval'] ?? null;
+        if ($amount === null && $currency === null && $interval === null) {
+            return ['price_amount' => null, 'price_currency' => null, 'billing_interval' => null];
+        }
+        if ($amount === null) {
+            throw new InvalidArgumentException('price_amount is required with a currency or interval.');
+        }
+        if (!is_int($amount) || $amount < 0) {
+            throw new InvalidArgumentException('price_amount must be a non-negative integer in minor units.');
+        }
+        if (!is_string($currency) || preg_match('/\A[A-Za-z]{3}\z/', $currency) !== 1) {
+            throw new InvalidArgumentException('price_currency must be a three-letter ISO 4217 code.');
+        }
+        if (!is_string($interval) || !in_array($interval, self::INTERVALS, true)) {
+            throw new InvalidArgumentException(
+                'billing_interval must be one of: ' . implode(', ', self::INTERVALS) . '.'
+            );
+        }
+        return ['price_amount' => $amount, 'price_currency' => strtoupper($currency), 'billing_interval' => $interval];
     }
 
     /**
@@ -144,6 +190,9 @@ final class PlanPayloadValidator
             'provider_identifiers' => $configPlan['provider_identifiers'] ?? null,
             'status' => $status,
             'sort_order' => $configPlan['sort_order'] ?? 0,
+            'price_amount' => $configPlan['price_amount'] ?? null,
+            'price_currency' => $configPlan['price_currency'] ?? null,
+            'billing_interval' => $configPlan['billing_interval'] ?? null,
         ]);
     }
 
