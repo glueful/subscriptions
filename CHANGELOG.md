@@ -13,6 +13,10 @@ All notable changes to `glueful/subscriptions` are documented here.
   pricing page or plan picker to say what a plan costs; the gateway still decides what is charged.
 - `PlanPurchasability::forGateway()` returns each plan's `price_amount`, `price_currency` and
   `billing_interval` (null when unset), so a plan picker can show the cost.
+- **A plan changed at the provider follows locally.** A `subscription.updated` event whose price
+  (`gateway_price_id`) belongs to another plan in the subscription's scope, by that plan's
+  `provider_identifiers` for the gateway, moves the subscription to that plan and its entitlements.
+  An unknown price changes nothing.
 
 ## [2.3.0] - 2026-08-17
 
